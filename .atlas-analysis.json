@@ -1,0 +1,144 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "Halo Cross-Media Measurement System",
+  "projectDescription": "A privacy-centric distributed system for cross-publisher, cross-media ads measurement through secure multiparty computations",
+  "theme": "aspen",
+  "primaryColor": "#040404",
+  "lightColor": "#ec364e",
+  "darkColor": "#f494a4",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "architecture",
+              "system-components"
+            ]
+          },
+          {
+            "group": "Setup & Deployment",
+            "pages": [
+              "deployment/prerequisites",
+              "deployment/kingdom-gke",
+              "deployment/duchy-gke",
+              "deployment/kingdom-eks",
+              "deployment/duchy-eks",
+              "deployment/terraform"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/creating-resources",
+              "operations/certificate-rotation",
+              "operations/retention-policies",
+              "operations/release-updates",
+              "operations/monitoring"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/building",
+              "development/testing",
+              "development/standards",
+              "development/intellij-setup",
+              "development/contributing"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/differential-privacy",
+              "concepts/secure-computation",
+              "concepts/sketches",
+              "concepts/protocol-cryptography"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Public APIs",
+            "pages": [
+              "api/overview",
+              "api/measurement-consumer",
+              "api/data-provider",
+              "api/reporting"
+            ]
+          },
+          {
+            "group": "System APIs",
+            "pages": [
+              "api/system/computation-control",
+              "api/system/requisition-fulfillment",
+              "api/system/duchy-protocol"
+            ]
+          },
+          {
+            "group": "Access Control",
+            "pages": [
+              "api/access/permissions",
+              "api/access/policies",
+              "api/access/principals"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Components",
+        "groups": [
+          {
+            "group": "Kingdom",
+            "pages": [
+              "components/kingdom/overview",
+              "components/kingdom/services",
+              "components/kingdom/daemons"
+            ]
+          },
+          {
+            "group": "Duchy",
+            "pages": [
+              "components/duchy/overview",
+              "components/duchy/services",
+              "components/duchy/daemons",
+              "components/duchy/mill-protocols"
+            ]
+          },
+          {
+            "group": "Supporting Services",
+            "pages": [
+              "components/edp-aggregator",
+              "components/privacy-budget-manager",
+              "components/panel-exchange"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Privacy-preserving cross-media measurement using secure multiparty computation",
+    "Distributed architecture with Kingdom controller and multiple Duchy nodes",
+    "Support for reach and frequency estimation with differential privacy",
+    "Kubernetes-native deployment on GKE and EKS",
+    "Cryptographic protocols for encrypted sketch computation",
+    "Multi-cloud support for enhanced security guarantees"
+  ],
+  "publicApiSurface": [
+    "MeasurementsService - Create and manage measurement reports",
+    "RequisitionsService - Fulfill data requisitions from publishers",
+    "EventGroupsService - Manage event data groups",
+    "DataProvidersService - Register and manage data providers",
+    "ComputationControlService - Control secure computation execution",
+    "ReportingService - Generate and retrieve reports",
+    "PermissionsService - Manage access permissions",
+    "PoliciesService - Configure access policies"
+  ]
+}
