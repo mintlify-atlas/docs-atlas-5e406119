@@ -1,0 +1,611 @@
+---
+title: Reporting API
+description: High-level reporting service for automated metric calculations and aggregations
+---
+
+The Reporting API (v2alpha) provides a high-level interface for creating and managing cross-media measurement reports with automated metric calculations, scheduling, and aggregations.
+
+## Overview
+
+The Reporting API simplifies measurement workflows by:
+
+- **Automated metric calculations** - Define metrics once, reuse across reports
+- **Report scheduling** - Automatically generate recurring reports
+- **Flexible aggregations** - Group metrics by time intervals and dimensions
+- **Batch operations** - Create multiple metrics efficiently
+- **Result caching** - Reuse metric results across reports
+
+<Note>
+The Reporting API is built on top of the lower-level Measurement Consumer API, providing higher-level abstractions for common reporting workflows.
+</Note>
+
+## Core Services
+
+### Reports Service
+
+Create and manage report resources:
+
+- `CreateReport` - Generate a new report
+- `GetReport` - Retrieve report by resource name
+- `ListReports` - List reports for a measurement consumer
+
+### Metrics Service
+
+Manage individual metric resources:
+
+- `CreateMetric` - Create a single metric
+- `BatchCreateMetrics` - Create multiple metrics (up to 1000)
+- `GetMetric` - Retrieve metric by resource name
+- `BatchGetMetrics` - Retrieve multiple metrics (up to 1000)
+- `ListMetrics` - List metrics for a measurement consumer
+- `InvalidateMetric` - Invalidate a cached metric result
+
+### Supporting Services
+
+- **ReportingSets** - Manage collections of event groups
+- **MetricCalculationSpecs** - Define reusable metric specifications
+- **ReportSchedules** - Configure automated report generation
+- **EventGroups** - Query available event groups
+
+## Reports
+
+### Report Resource
+
+<ParamField path="name" type="string">
+  Resource name
+  
+  **Format:** `measurementConsumers/{measurement_consumer}/reports/{report}`
+</ParamField>
+
+<ParamField path="reporting_metric_entries" type="ReportingMetricEntry[]" required>
+  Map of reporting sets to metric calculation specs
+  
+  Each entry defines which metrics to calculate for a specific reporting set.
+</ParamField>
+
+<ParamField path="time" type="oneof">
+  Time interval configuration (one of):
+  
+  - `time_intervals` - List of specific time ranges
+  - `reporting_interval` - Single interval with frequency subdivision
+</ParamField>
+
+<ParamField path="state" type="enum">
+  Report state (output only)
+  
+  **Values:**
+  - `RUNNING` - Computation in progress
+  - `SUCCEEDED` - Completed successfully
+  - `FAILED` - Computation failed
+</ParamField>
+
+<ParamField path="metric_calculation_results" type="MetricCalculationResult[]">
+  Calculated metric results (output only)
+  
+  Available when state is `SUCCEEDED` or `FAILED`.
+</ParamField>
+
+### Creating Reports
+
+<CodeGroup>
+```python Python
+from wfa.measurement.reporting.v2alpha import reports_service_pb2
+from google.type import datetime_pb2, date_pb2
+
+request = reports_service_pb2.CreateReportRequest(
+    parent="measurementConsumers/123",
+    report_id="q1-2024-reach-report",
+    report=reports_service_pb2.Report(
+        reporting_metric_entries=[
+            reports_service_pb2.Report.ReportingMetricEntry(
+                key="measurementConsumers/123/reportingSets/spring-campaign",
+                value=reports_service_pb2.Report.ReportingMetricCalculationSpec(
+                    metric_calculation_specs=[
+                        "measurementConsumers/123/metricCalculationSpecs/reach-spec",
+                        "measurementConsumers/123/metricCalculationSpecs/frequency-spec"
+                    ]
+                )
+            )
+        ],
+        reporting_interval=reports_service_pb2.Report.ReportingInterval(
+            report_start=datetime_pb2.DateTime(
+                year=2024,
+                month=1,
+                day=1,
+                hours=0,
+                minutes=0,
+                seconds=0,
+                time_offset=datetime_pb2.DateTime.TimeOffset(
+                    utc_offset=duration_pb2.Duration(seconds=0)
+                )
+            ),
+            report_end=date_pb2.Date(
+                year=2024,
+                month=3,
+                day=31
+            )
+        ),
+        tags={
+            "campaign": "spring-2024",
+            "region": "north-america"
+        }
+    ),
+    request_id="550e8400-e29b-41d4-a716-446655440000"
+)
+
+response = reports_client.CreateReport(request)
+print(f"Report created: {response.name}")
+print(f"State: {response.state}")
+```
+
+```bash cURL
+curl -X POST "https://api.example.com/v2alpha/measurementConsumers/123/reports" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "reportId": "q1-2024-reach-report",
+    "report": {
+      "reportingMetricEntries": [{
+        "key": "measurementConsumers/123/reportingSets/spring-campaign",
+        "value": {
+          "metricCalculationSpecs": [
+            "measurementConsumers/123/metricCalculationSpecs/reach-spec"
+          ]
+        }
+      }],
+      "reportingInterval": {
+        "reportStart": {
+          "year": 2024,
+          "month": 1,
+          "day": 1
+        },
+        "reportEnd": {
+          "year": 2024,
+          "month": 3,
+          "day": 31
+        }
+      }
+    },
+    "requestId": "550e8400-e29b-41d4-a716-446655440000"
+  }'
+```
+</CodeGroup>
+
+### Listing Reports
+
+<ParamField path="parent" type="string" required>
+  Parent measurement consumer
+  
+  **Format:** `measurementConsumers/{measurement_consumer}`
+</ParamField>
+
+<ParamField path="page_size" type="int32">
+  Maximum number of reports to return (default: 50, max: 1000)
+</ParamField>
+
+<ParamField path="page_token" type="string">
+  Token from previous ListReports call for pagination
+</ParamField>
+
+<ParamField path="filter" type="string">
+  CEL expression filter
+  
+  **Example:** `state = 'SUCCEEDED' && create_time > timestamp('2024-01-01T00:00:00Z')`
+</ParamField>
+
+## Metrics
+
+### Metric Resource
+
+<ParamField path="name" type="string">
+  Resource name
+  
+  **Format:** `measurementConsumers/{measurement_consumer}/metrics/{metric}`
+</ParamField>
+
+<ParamField path="reporting_set" type="string" required>
+  Reporting set to calculate metric on
+  
+  **Format:** `measurementConsumers/{measurement_consumer}/reportingSets/{reporting_set}`
+</ParamField>
+
+<ParamField path="time_interval" type="Interval" required>
+  Time range for metric calculation (cumulative)
+</ParamField>
+
+<ParamField path="metric_spec" type="MetricSpec" required>
+  Specification of what to calculate
+  
+  **Types:** `reach`, `reach_and_frequency`, `impression_count`, `watch_duration`, `population_count`
+</ParamField>
+
+<ParamField path="filters" type="string[]">
+  Additional event filters (combined with AND)
+</ParamField>
+
+<ParamField path="state" type="enum">
+  Metric state (output only)
+  
+  **Values:**
+  - `RUNNING` - Computation in progress
+  - `SUCCEEDED` - Completed successfully
+  - `FAILED` - Computation failed
+  - `INVALID` - Result invalidated after success
+</ParamField>
+
+<ParamField path="result" type="MetricResult">
+  Calculated metric result (output only)
+</ParamField>
+
+### Metric Types
+
+#### Reach
+
+Count of unique users reached:
+
+```python
+metric_spec = MetricSpec(
+    reach=MetricSpec.ReachParams(
+        multiple_data_provider_params=MetricSpec.SamplingAndPrivacyParams(
+            privacy_params=MetricSpec.DifferentialPrivacyParams(
+                epsilon=0.01,
+                delta=1e-12
+            ),
+            vid_sampling_interval=MetricSpec.VidSamplingInterval(
+                start=0.0,
+                width=1.0
+            )
+        ),
+        single_data_provider_params=MetricSpec.SamplingAndPrivacyParams(
+            privacy_params=MetricSpec.DifferentialPrivacyParams(
+                epsilon=0.005,
+                delta=1e-12
+            ),
+            vid_sampling_interval=MetricSpec.VidSamplingInterval(
+                start=0.0,
+                width=1.0
+            )
+        )
+    )
+)
+```
+
+**Result:**
+```python
+MetricResult(
+    reach=MetricResult.ReachResult(
+        value=1234567,
+        univariate_statistics=UnivariateStatistics(
+            standard_deviation=5432.1
+        )
+    )
+)
+```
+
+#### Reach and Frequency
+
+Reach with frequency distribution:
+
+```python
+metric_spec = MetricSpec(
+    reach_and_frequency=MetricSpec.ReachAndFrequencyParams(
+        multiple_data_provider_params=MetricSpec.ReachAndFrequencySamplingAndPrivacyParams(
+            reach_privacy_params=MetricSpec.DifferentialPrivacyParams(
+                epsilon=0.01,
+                delta=1e-12
+            ),
+            frequency_privacy_params=MetricSpec.DifferentialPrivacyParams(
+                epsilon=0.01,
+                delta=1e-12
+            ),
+            vid_sampling_interval=MetricSpec.VidSamplingInterval(
+                start=0.0,
+                width=1.0
+            )
+        ),
+        single_data_provider_params=MetricSpec.ReachAndFrequencySamplingAndPrivacyParams(
+            reach_privacy_params=MetricSpec.DifferentialPrivacyParams(
+                epsilon=0.005,
+                delta=1e-12
+            ),
+            frequency_privacy_params=MetricSpec.DifferentialPrivacyParams(
+                epsilon=0.005,
+                delta=1e-12
+            )
+        ),
+        maximum_frequency=10
+    )
+)
+```
+
+**Result:**
+```python
+MetricResult(
+    reach_and_frequency=MetricResult.ReachAndFrequencyResult(
+        reach=MetricResult.ReachResult(
+            value=1234567,
+            univariate_statistics=UnivariateStatistics(standard_deviation=5432.1)
+        ),
+        frequency_histogram=MetricResult.HistogramResult(
+            bins=[
+                MetricResult.HistogramResult.Bin(
+                    label="1",
+                    bin_result=MetricResult.HistogramResult.BinResult(value=500000),
+                    result_univariate_statistics=UnivariateStatistics(standard_deviation=1234.5)
+                ),
+                MetricResult.HistogramResult.Bin(
+                    label="2",
+                    bin_result=MetricResult.HistogramResult.BinResult(value=300000),
+                    result_univariate_statistics=UnivariateStatistics(standard_deviation=987.3)
+                ),
+                # ... additional frequency bins
+            ]
+        )
+    )
+)
+```
+
+#### Impression Count
+
+Total impressions with differential privacy:
+
+```python
+metric_spec = MetricSpec(
+    impression_count=MetricSpec.ImpressionCountParams(
+        params=MetricSpec.SamplingAndPrivacyParams(
+            privacy_params=MetricSpec.DifferentialPrivacyParams(
+                epsilon=0.01,
+                delta=1e-12
+            )
+        ),
+        maximum_frequency_per_user=60
+    )
+)
+```
+
+#### Watch Duration
+
+Total watch duration for video content:
+
+```python
+metric_spec = MetricSpec(
+    watch_duration=MetricSpec.WatchDurationParams(
+        params=MetricSpec.SamplingAndPrivacyParams(
+            privacy_params=MetricSpec.DifferentialPrivacyParams(
+                epsilon=0.01,
+                delta=1e-12
+            )
+        ),
+        maximum_watch_duration_per_user=duration_pb2.Duration(seconds=4000)
+    )
+)
+```
+
+### Batch Operations
+
+#### Batch Create Metrics
+
+Create up to 1000 metrics in a single request:
+
+```python
+from wfa.measurement.reporting.v2alpha import metrics_service_pb2
+
+requests = []
+for i, interval in enumerate(time_intervals):
+    requests.append(
+        metrics_service_pb2.CreateMetricRequest(
+            parent="measurementConsumers/123",
+            metric_id=f"metric-{i}",
+            metric=metrics_service_pb2.Metric(
+                reporting_set="measurementConsumers/123/reportingSets/campaign-1",
+                time_interval=interval,
+                metric_spec=reach_spec
+            )
+        )
+    )
+
+batch_request = metrics_service_pb2.BatchCreateMetricsRequest(
+    parent="measurementConsumers/123",
+    requests=requests
+)
+
+response = metrics_client.BatchCreateMetrics(batch_request)
+print(f"Created {len(response.metrics)} metrics")
+```
+
+<Note>
+Batch operations are atomic: all metrics succeed or all fail. This ensures consistency when creating multiple related metrics.
+</Note>
+
+#### Batch Get Metrics
+
+Retrieve up to 1000 metrics in a single request:
+
+```python
+metric_names = [
+    "measurementConsumers/123/metrics/metric-1",
+    "measurementConsumers/123/metrics/metric-2",
+    # ... up to 1000 names
+]
+
+request = metrics_service_pb2.BatchGetMetricsRequest(
+    parent="measurementConsumers/123",
+    names=metric_names
+)
+
+response = metrics_client.BatchGetMetrics(request)
+for metric in response.metrics:
+    if metric.state == metrics_service_pb2.Metric.SUCCEEDED:
+        print(f"{metric.name}: {metric.result}")
+```
+
+## Reporting Sets
+
+A **ReportingSet** is a named collection of event groups used for metric calculations:
+
+```python
+from wfa.measurement.reporting.v2alpha import reporting_sets_service_pb2
+
+request = reporting_sets_service_pb2.CreateReportingSetRequest(
+    parent="measurementConsumers/123",
+    reporting_set_id="spring-campaign",
+    reporting_set=reporting_sets_service_pb2.ReportingSet(
+        event_groups=[
+            "measurementConsumers/123/eventGroups/eg-1",
+            "measurementConsumers/123/eventGroups/eg-2",
+            "measurementConsumers/123/eventGroups/eg-3"
+        ],
+        filter="event.type == 'IMPRESSION'",
+        display_name="Spring 2024 Campaign"
+    )
+)
+
+reporting_set = reporting_sets_client.CreateReportingSet(request)
+```
+
+## Metric Calculation Specs
+
+**MetricCalculationSpec** defines reusable metric configurations:
+
+```python
+from wfa.measurement.reporting.v2alpha import metric_calculation_specs_service_pb2
+
+request = metric_calculation_specs_service_pb2.CreateMetricCalculationSpecRequest(
+    parent="measurementConsumers/123",
+    metric_calculation_spec_id="reach-spec",
+    metric_calculation_spec=metric_calculation_specs_service_pb2.MetricCalculationSpec(
+        display_name="Standard Reach Calculation",
+        metric_spec=metric_spec,
+        metric_frequency_spec=metric_calculation_specs_service_pb2.MetricFrequencySpec(
+            daily=metric_calculation_specs_service_pb2.MetricFrequencySpec.Daily()
+        ),
+        trailing_window=metric_calculation_specs_service_pb2.MetricCalculationSpec.TrailingWindow(
+            count=7,
+            increment=metric_calculation_specs_service_pb2.MetricCalculationSpec.TrailingWindow.DAY
+        )
+    )
+)
+
+spec = metric_calculation_specs_client.CreateMetricCalculationSpec(request)
+```
+
+## Report Schedules
+
+Automate report generation with schedules:
+
+```python
+from wfa.measurement.reporting.v2alpha import report_schedules_service_pb2
+
+request = report_schedules_service_pb2.CreateReportScheduleRequest(
+    parent="measurementConsumers/123",
+    report_schedule_id="weekly-reach-report",
+    report_schedule=report_schedules_service_pb2.ReportSchedule(
+        display_name="Weekly Reach Report",
+        report_template=report_schedules_service_pb2.Report(
+            reporting_metric_entries=[...],
+            # No time interval - filled by schedule
+        ),
+        frequency=report_schedules_service_pb2.ReportSchedule.Frequency(
+            weekly=report_schedules_service_pb2.ReportSchedule.Frequency.Weekly(
+                day_of_week=report_schedules_service_pb2.MONDAY
+            )
+        ),
+        reporting_window=report_schedules_service_pb2.ReportSchedule.ReportingWindow(
+            trailing_count=7,
+            trailing_increment=report_schedules_service_pb2.ReportSchedule.ReportingWindow.DAY
+        )
+    )
+)
+
+schedule = report_schedules_client.CreateReportSchedule(request)
+```
+
+## Event Groups
+
+Query available event groups before creating reports:
+
+```python
+from wfa.measurement.reporting.v2alpha import event_groups_service_pb2
+
+request = event_groups_service_pb2.ListEventGroupsRequest(
+    parent="measurementConsumers/123",
+    structured_filter=event_groups_service_pb2.ListEventGroupsRequest.Filter(
+        cmms_data_provider_in=["dataProviders/456"],
+        media_types_intersect=[event_groups_service_pb2.VIDEO],
+        data_availability_start_time_on_or_after=timestamp_pb2.Timestamp(
+            seconds=int(datetime(2024, 1, 1).timestamp())
+        )
+    ),
+    page_size=100
+)
+
+response = event_groups_client.ListEventGroups(request)
+for event_group in response.event_groups:
+    print(f"Event Group: {event_group.name}")
+    print(f"  Metadata: {event_group.event_group_metadata}")
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Reuse metric calculation specs">
+    Define metric calculation specs once and reference them across multiple reports to ensure consistency.
+  </Accordion>
+  
+  <Accordion title="Use batch operations for multiple metrics">
+    When creating metrics for multiple time intervals or reporting sets, use `BatchCreateMetrics` for better performance.
+  </Accordion>
+  
+  <Accordion title="Leverage metric caching">
+    The system automatically caches metric results. Reusing the same metric configuration (reporting set + time interval + spec) across reports avoids redundant computations.
+  </Accordion>
+  
+  <Accordion title="Tag reports for organization">
+    Use the `tags` field to add metadata (campaign names, regions, etc.) that helps with filtering and organizing reports.
+  </Accordion>
+  
+  <Accordion title="Schedule recurring reports">
+    For routine reporting needs, use ReportSchedules to automate report generation rather than manual API calls.
+  </Accordion>
+  
+  <Accordion title="Monitor report state">
+    Implement polling with exponential backoff to check report state. Most reports complete within minutes.
+  </Accordion>
+</AccordionGroup>
+
+## Error Handling
+
+<ResponseField name="INVALID_ARGUMENT" type="error">
+  Invalid metric specification or time interval
+  
+  **Common causes:**
+  - Time interval start is after end
+  - Privacy parameters out of valid range
+  - Invalid resource name format
+</ResponseField>
+
+<ResponseField name="FAILED_PRECONDITION" type="error">
+  Cannot create metric due to system state
+  
+  **Common causes:**
+  - Reporting set has no event groups
+  - Event groups not available for time interval
+</ResponseField>
+
+<ResponseField name="RESOURCE_EXHAUSTED" type="error">
+  Too many concurrent metrics or reports
+  
+  **Resolution:** Implement rate limiting and retry with exponential backoff
+</ResponseField>
+
+## Related APIs
+
+<CardGroup cols={2}>
+  <Card title="Measurement Consumer API" icon="chart-line" href="/api/measurement-consumer">
+    Lower-level measurement creation
+  </Card>
+  
+  <Card title="API Overview" icon="book" href="/api/overview">
+    Complete API architecture
+  </Card>
+</CardGroup>

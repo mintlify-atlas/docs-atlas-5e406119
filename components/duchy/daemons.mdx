@@ -1,0 +1,584 @@
+---
+title: Duchy Daemons
+description: Background workers and daemons in Duchy deployments
+---
+
+Duchy daemons are background processes that coordinate computation workflows, claim work from the Kingdom, schedule mill jobs, and clean up old computations. Unlike the always-running gRPC services, daemons actively poll for work and orchestrate computation execution.
+
+## Overview
+
+<CardGroup cols={3}>
+  <Card title="Herald Daemon" icon="bell">
+    Claims new computations from Kingdom
+  </Card>
+  <Card title="Mill Job Scheduler" icon="calendar">
+    Schedules Kubernetes Jobs for computation stages
+  </Card>
+  <Card title="Computations Cleaner" icon="broom">
+    Removes old computation data (CronJob)
+  </Card>
+</CardGroup>
+
+## Herald Daemon
+
+**Image**: `duchy/herald`  
+**Deployment Name**: `{duchy-name}-herald-daemon`  
+**Type**: Continuous deployment
+
+### Purpose
+
+The **Herald** is the duchy's agent for discovering and claiming work from the Kingdom. It continuously monitors the Kingdom's System API for new computations assigned to this duchy and initializes them in the local duchy database.
+
+### Implementation
+
+Implemented in `src/main/kotlin/org/wfanet/measurement/duchy/herald/`:
+
+**File**: `Herald.kt`
+
+### Responsibilities
+
+<Accordion title="Work Discovery">
+  The Herald polls the Kingdom System API to discover new computations:
+  - Streams active computations from Kingdom
+  - Filters for computations where this duchy is a participant
+  - Identifies computations not yet known locally
+  - Detects state changes in existing computations
+</Accordion>
+
+<Accordion title="Work Claiming">
+  Claims computations by:
+  - Creating computation records in local Spanner database
+  - Confirming participation with Kingdom
+  - Initializing computation tokens for work locking
+  - Setting initial computation stage
+  - Storing protocol-specific configuration
+</Accordion>
+
+<Accordion title="State Synchronization">
+  Keeps duchy state in sync with Kingdom:
+  - Detects when Kingdom advances computation state
+  - Updates local computation records accordingly
+  - Handles computation cancellation from Kingdom
+  - Marks computations as completed when Kingdom indicates success
+</Accordion>
+
+<Accordion title="Computation Lifecycle Management">
+  Manages the full lifecycle:
+  - **WAIT_TO_START**: Waiting for all participants to confirm
+  - **READY**: Ready to begin computation
+  - **RUNNING**: Actively computing
+  - **SUCCEEDED/FAILED/CANCELLED**: Terminal states
+  
+  Herald can optionally delete computations in terminal states based on configuration.
+</Accordion>
+
+### Key Features
+
+**Streaming Protocol:**
+The Herald uses gRPC streaming to efficiently monitor computations:
+```kotlin
+systemComputationsClient.streamActiveComputations(request)
+  .catch { exception ->
+    // Handle transient errors with retry
+  }
+  .collect { computation ->
+    processSystemComputationChange(computation)
+  }
+```
+
+**Concurrency Control:**
+- Uses semaphore to limit concurrent computation processing
+- Default max concurrency: 5 computations
+- Prevents overwhelming the database with parallel writes
+
+**Continuation Tokens:**
+- Maintains resumption tokens for streaming
+- Enables recovery from network interruptions
+- Ensures no computations are missed during reconnection
+
+**Error Handling:**
+- Exponential backoff for transient failures
+- Maximum retry attempts (default: 5 for streaming, 3 for operations)
+- Graceful handling of Kingdom unavailability
+
+**Deletable Computation States:**
+Optionally delete computations in terminal states to save storage:
+```bash
+--deletable-computation-state=SUCCEEDED
+--deletable-computation-state=FAILED
+--deletable-computation-state=CANCELLED
+```
+
+### Configuration Flags
+
+```bash
+--duchy-name={duchy-id}
+--tls-cert-file=/var/run/secrets/files/{duchy}_tls.pem
+--tls-key-file=/var/run/secrets/files/{duchy}_tls.key
+--cert-collection-file=/var/run/secrets/files/all_root_certs.pem
+--protocols-setup-config=/var/run/secrets/files/{protocols_setup_config}
+--computations-service-target={duchy}-internal-api-server:8443
+--computations-service-cert-host=localhost
+--kingdom-system-api-target={kingdom-system-api-endpoint}
+--kingdom-system-api-cert-host=localhost
+--deletable-computation-state=SUCCEEDED  # Optional
+--deletable-computation-state=FAILED     # Optional
+--deletable-computation-state=CANCELLED  # Optional
+--key-encryption-key-file=/var/run/secrets/files/{kek-file}  # Optional
+```
+
+Plus blob storage configuration flags.
+
+### Protocols Setup Config
+
+The Herald loads protocol configuration that defines:
+- Supported protocols (LLv2, Reach-Only LLv2, HMSS, TrusTee)
+- Duchy's role in each protocol
+- Protocol-specific parameters
+- Cryptographic keys and certificates
+
+Example role configuration:
+```protobuf
+role_in_computation: AGGREGATOR  # or NON_AGGREGATOR
+```
+
+### Blob Storage
+
+Herald needs blob storage access to:
+- Store initial requisition data locations
+- Manage computation artifact paths
+- Configure storage prefixes for this duchy
+
+Configuration:
+```bash
+--google-cloud-storage-bucket=duchy-computation-storage
+--google-cloud-storage-project=my-project
+```
+
+### Private Key Storage
+
+For protocols requiring key encryption (e.g., HMSS):
+```bash
+--key-encryption-key-file=/var/run/secrets/files/duchy_kek.bin
+```
+
+This key encrypts/decrypts duchy private keys stored in Spanner.
+
+### Monitoring
+
+<CardGroup cols={2}>
+  <Card title="Claimed Computations" icon="plus">
+    Rate of new computations claimed from Kingdom
+  </Card>
+  <Card title="Streaming Reconnects" icon="rotate">
+    Frequency of stream interruptions and reconnections
+  </Card>
+  <Card title="Processing Lag" icon="clock">
+    Time between Kingdom creating computation and Herald claiming it
+  </Card>
+  <Card title="Error Rate" icon="triangle-exclamation">
+    Failed claim attempts and retry counts
+  </Card>
+</CardGroup>
+
+## Mill Job Scheduler
+
+**Image**: `duchy/mill-job-scheduler`  
+**Deployment Name**: `{duchy-name}-mill-job-scheduler`  
+**Type**: Continuous deployment
+
+### Purpose
+
+The **Mill Job Scheduler** monitors the duchy's Internal API for computations ready to execute and creates Kubernetes Jobs to run the appropriate mill workers for each computation stage.
+
+### Responsibilities
+
+<Accordion title="Work Polling">
+  Continuously polls for claimable work:
+  - Queries Internal API for computations in executable states
+  - Claims work using token-based locking
+  - Respects work lock durations to prevent duplicate execution
+  - Polls at configurable intervals (default based on deployment)
+</Accordion>
+
+<Accordion title="Job Creation">
+  Creates Kubernetes Jobs for mill execution:
+  - Selects appropriate PodTemplate (LLv2, HMSS)
+  - Generates unique Job name from computation token
+  - Passes computation details via command-line arguments
+  - Sets job timeout and retry policies
+  - Manages job lifecycle (creation, monitoring, cleanup)
+</Accordion>
+
+<Accordion title="Concurrency Management">
+  Enforces limits on parallel computations:
+  - LLv2 maximum concurrency (configurable)
+  - HMSS maximum concurrency (configurable)
+  - Prevents resource exhaustion
+  - Queues work when at capacity
+</Accordion>
+
+<Accordion title="Job Cleanup">
+  Removes completed Kubernetes Jobs:
+  - Deletes successful jobs after completion
+  - Retains failed jobs for debugging (configurable)
+  - Prevents Job object accumulation
+  - Manages Kubernetes API quota
+</Accordion>
+
+### Implementation
+
+The Mill Job Scheduler is implemented in duchy deploy code and uses:
+- Kubernetes client to create/delete Jobs
+- Internal API client to claim work
+- PodTemplate references for job definitions
+
+### Configuration Flags
+
+```bash
+--deployment-name={deployment-name}
+--duchy-name={duchy-id}
+--tls-cert-file=/var/run/secrets/files/{duchy}_tls.pem
+--tls-key-file=/var/run/secrets/files/{duchy}_tls.key
+--cert-collection-file=/var/run/secrets/files/all_root_certs.pem
+--computations-service-target={duchy}-internal-api-server:8443
+--computations-service-cert-host=localhost
+
+# Polling configuration
+--polling-delay=1s  # How often to check for work
+
+# LLv2 configuration
+--llv2-pod-template-name={duchy}-llv2-mill
+--llv2-work-lock-duration=5m
+--llv2-maximum-concurrency=10
+
+# HMSS configuration
+--hmss-pod-template-name={duchy}-hmss-mill
+--hmss-work-lock-duration=5m
+--hmss-maximum-concurrency=10
+```
+
+### Work Lock Duration
+
+The work lock duration determines how long a mill worker has to complete a stage:
+
+**Too Short**: Jobs may not finish before lock expires, causing duplicate work  
+**Too Long**: Failed jobs hold locks unnecessarily, delaying retries
+
+**Typical Values:**
+- Simple stages: 5 minutes
+- Complex stages: 15-30 minutes
+- Adjust based on data size and cluster resources
+
+### PodTemplates
+
+The scheduler references PodTemplates defined in the duchy deployment:
+
+**LLv2 Mill Template**: `{duchy}-llv2-mill`  
+**HMSS Mill Template**: `{duchy}-hmss-mill`
+
+These templates define:
+- Container image for mill worker
+- Resource requests/limits
+- Volume mounts (secrets, config)
+- Environment variables
+- Restart policy (typically "Never" for Jobs)
+
+### Kubernetes Permissions
+
+The Mill Job Scheduler requires RBAC permissions:
+
+**ServiceAccount**: `{duchy}-mill-job-scheduler`
+
+**Role permissions**:
+```yaml
+apiGroups: ["batch"]
+resources: ["jobs"]
+verbs: ["get", "list", "create", "delete"]
+
+apiGroups: [""]
+resources: ["podtemplates"]
+verbs: ["get"]
+
+apiGroups: ["apps"]
+resources: ["deployments"]
+verbs: ["get"]
+```
+
+These permissions allow the scheduler to:
+- Create Jobs from PodTemplates
+- Monitor Job status
+- Delete completed Jobs
+- Query its own Deployment for configuration
+
+### Resource Allocation
+
+The Mill Job Scheduler is lightweight:
+```yaml
+requests:
+  cpu: 50m
+  memory: 224Mi
+limits:
+  memory: 224Mi
+```
+
+Most resources are consumed by the mill worker Jobs it creates.
+
+### Monitoring
+
+<CardGroup cols={2}>
+  <Card title="Jobs Created" icon="plus">
+    Rate of mill job creation per protocol
+  </Card>
+  <Card title="Queue Depth" icon="layer-group">
+    Number of computations waiting for capacity
+  </Card>
+  <Card title="Job Success Rate" icon="circle-check">
+    Percentage of jobs completing successfully
+  </Card>
+  <Card title="Lock Contention" icon="lock">
+    Frequency of work already locked by another worker
+  </Card>
+</CardGroup>
+
+## Computations Cleaner
+
+**Image**: `duchy/computations-cleaner`  
+**CronJob Name**: `{duchy-name}-computations-cleaner`  
+**Schedule**: `0 * * * *` (Every hour, on the hour)
+
+### Purpose
+
+The Computations Cleaner is a **CronJob** that removes old computation data from the duchy's Spanner database to:
+
+- Free up database storage
+- Maintain query performance
+- Remove computations that are no longer needed
+- Comply with data retention policies
+
+### Operation
+
+Implemented in `src/main/kotlin/org/wfanet/measurement/duchy/service/internal/computations/`:
+
+**File**: `ComputationsCleaner.kt`
+
+<Accordion title="Deletion Strategy">
+  The cleaner:
+  1. Queries for computations older than TTL
+  2. Filters by deletable states (if configured)
+  3. Deletes computation records from Spanner
+  4. Optionally removes associated blob storage
+  5. Logs deletion operations for audit
+</Accordion>
+
+### Configuration Flags
+
+```bash
+--duchy-name={duchy-id}
+--tls-cert-file=/var/run/secrets/files/{duchy}_tls.pem
+--tls-key-file=/var/run/secrets/files/{duchy}_tls.key
+--cert-collection-file=/var/run/secrets/files/all_root_certs.pem
+--computations-service-target={duchy}-internal-api-server:8443
+--computations-service-cert-host=localhost
+
+# Retention policy
+--computations-time-to-live=180d  # Default: 180 days
+
+# Testing
+--dry-run  # Log what would be deleted without actually deleting
+```
+
+### Time to Live (TTL)
+
+Default retention: **180 days**
+
+Considerations for setting TTL:
+- **Storage costs**: Longer retention = higher costs
+- **Debugging needs**: Recent computations useful for troubleshooting
+- **Compliance**: May need to retain for audit purposes
+- **Coordination**: Should align with Kingdom's completed measurements deletion
+
+### Deletable States
+
+The cleaner can be configured via duchy deployment to only delete specific states:
+- SUCCEEDED
+- FAILED
+- CANCELLED
+
+If not configured, may delete all old computations regardless of state.
+
+### Dry Run Mode
+
+Test deletion policies before enabling:
+```bash
+--dry-run
+```
+
+In dry run mode:
+- Queries for deletable computations
+- Logs what would be deleted
+- Does not actually delete anything
+- Useful for validating TTL settings
+
+### Schedule
+
+Runs **every hour** at minute 0:
+```yaml
+schedule: "0 * * * *"
+```
+
+This frequency ensures:
+- Regular cleanup without excessive database load
+- Timely removal of old data
+- Manageable batch sizes per run
+
+### Network Policy
+
+The cleaner CronJob can only communicate with:
+- Internal API Server (to delete computations)
+
+All other network traffic is denied.
+
+## Daemon Deployment Patterns
+
+### Common Configuration
+
+All daemons share:
+
+**Secrets Access**:
+- TLS certificates for authentication
+- Optional key encryption keys
+
+**Network Policies**:
+- Restricted egress to required services only
+- No ingress (daemons initiate all connections)
+
+**Monitoring**:
+- Health checks
+- Optional verbose logging
+- Metrics export (when configured)
+
+### Reliability
+
+<Accordion title="Restart Policies">
+  **Herald & Mill Job Scheduler**: `Always`
+  - Critical daemons that must stay running
+  - Kubernetes automatically restarts on failure
+  
+  **Computations Cleaner**: CronJob
+  - Runs on schedule
+  - Failures don't require immediate restart
+</Accordion>
+
+<Accordion title="Graceful Shutdown">
+  Daemons handle SIGTERM:
+  - Complete current operation
+  - Close database connections
+  - Save continuation tokens
+  - Exit cleanly
+</Accordion>
+
+<Accordion title="Backoff and Retry">
+  Exponential backoff for:
+  - Kingdom API failures
+  - Internal API unavailability
+  - Network errors
+  - Transient database errors
+</Accordion>
+
+## Troubleshooting
+
+### Herald Not Claiming Work
+
+**Check Kingdom connectivity:**
+```bash
+kubectl logs deployment/{duchy}-herald-daemon | grep "kingdom"
+```
+
+**Verify certificates:**
+```bash
+kubectl exec deployment/{duchy}-herald-daemon -- ls -la /var/run/secrets/files/
+```
+
+**Check computation states in Kingdom:**
+```bash
+# Use Kingdom API to query pending computations
+```
+
+### Mill Jobs Not Starting
+
+**Check scheduler logs:**
+```bash
+kubectl logs deployment/{duchy}-mill-job-scheduler
+```
+
+**Verify PodTemplates exist:**
+```bash
+kubectl get podtemplates | grep {duchy}
+```
+
+**Check RBAC permissions:**
+```bash
+kubectl auth can-i create jobs --as=system:serviceaccount:{namespace}:{duchy}-mill-job-scheduler
+```
+
+**Look for resource constraints:**
+```bash
+kubectl describe nodes | grep -A 5 "Allocated resources"
+```
+
+### Cleaner Not Deleting
+
+**Check CronJob status:**
+```bash
+kubectl get cronjobs | grep cleaner
+```
+
+**View recent executions:**
+```bash
+kubectl get jobs | grep cleaner | head -5
+```
+
+**Check job logs:**
+```bash
+kubectl logs job/{duchy}-computations-cleaner-{timestamp}
+```
+
+**Verify TTL and dry-run settings:**
+```bash
+kubectl describe cronjob/{duchy}-computations-cleaner | grep -A 10 "Args"
+```
+
+## Best Practices
+
+### Herald Configuration
+
+- Set appropriate max concurrency based on database capacity
+- Use continuation tokens for stream resumption
+- Configure deletable states to match retention policy
+- Monitor streaming reconnection frequency
+
+### Mill Job Scheduler
+
+- Set work lock duration 2-3x expected stage duration
+- Configure max concurrency based on cluster resources
+- Monitor job success rates and adjust retry policies
+- Clean up old jobs to prevent Kubernetes API overload
+
+### Computations Cleaner
+
+- Align TTL with Kingdom's measurement deletion policy
+- Test with dry-run before enabling deletion
+- Monitor storage savings from cleanup
+- Consider blob storage cleanup separately
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Mill Protocols" icon="shield" href="/components/duchy/mill-protocols">
+    Learn about cryptographic protocols executed by mills
+  </Card>
+  <Card title="Duchy Services" icon="server" href="/components/duchy/services">
+    Understand duchy API services
+  </Card>
+</CardGroup>

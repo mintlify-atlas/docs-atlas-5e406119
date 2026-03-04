@@ -1,0 +1,289 @@
+---
+title: Data Retention Policies
+description: Configure and manage data retention policies for measurements and exchanges in the Kingdom
+---
+
+Learn how to update retention policies within a Halo CMMS deployment to automatically manage the lifecycle of measurements and exchanges.
+
+<Note>
+This guide assumes familiarity with Kubernetes and an existing CMMS instance with a Kingdom deployed locally or through GKE.
+
+See the [Local Kubernetes Configuration](https://github.com/world-federation-of-advertisers/cross-media-measurement/tree/main/src/main/k8s/local) or [Kingdom Deployment Guide](../deployment/kingdom-gke) for setup instructions.
+</Note>
+
+## Retention Policy CronJobs
+
+Retention policies are enforced through configured CronJobs that are enabled by default on Kingdom deployments.
+
+### Viewing Configured CronJobs
+
+List all retention policy CronJobs:
+
+```bash
+kubectl get cronjobs
+```
+
+Example output:
+
+```
+NAME                                      SCHEDULE    SUSPEND ACTIVE LAST SCHEDULE AGE
+completed-measurements-deletion-cronjob   15 * * * *  False   0      52m           5h32m
+exchanges-deletion-cronjob                40 6 * * *  False   0      10h27m        5h32m
+pending-measurements-cancellation-cronjob 45 * * * *  False   0      22m           5h32m
+```
+
+### Understanding the Schedule
+
+The `SCHEDULE` column uses [Cron syntax](https://en.wikipedia.org/wiki/Cron) to specify execution frequency:
+
+- `15 * * * *` - Runs hourly at 15 minutes past the hour
+- `40 6 * * *` - Runs daily at 6:40 AM
+- `45 * * * *` - Runs hourly at 45 minutes past the hour
+
+### Configuration Flags
+
+Each CronJob has two primary configuration flags:
+
+| Flag | Purpose | Values |
+|------|---------|--------|
+| `--dry-run` | Controls whether operations are executed or just logged | `true` (log only) or `false` (execute) |
+| `--time-to-live` / `--days-to-live` | How long a resource must be in a state before the retention operation applies | Duration (e.g., `7d`) or integer (days) |
+
+<Warning>
+**Dry Run Mode**
+
+By default, CronJobs may be in dry-run mode. When `--dry-run=true`, the job will only log operations that would be performed without actually executing them.
+
+Set `--dry-run=false` to enable actual retention operations.
+</Warning>
+
+## Kingdom Retention CronJobs
+
+The Kingdom deployment includes three retention policy CronJobs:
+
+<Accordion title="completed-measurements-deletion-cronjob">
+
+**Purpose**: Deletes measurements in terminal states after a specified time.
+
+**Behavior**: Measurements are deleted if:
+- They are in a terminal state (SUCCEEDED, FAILED, or CANCELLED)
+- The time since their last update exceeds the `--time-to-live` duration
+
+**Default Schedule**: Hourly at 15 minutes past the hour
+
+**Example Configuration**:
+```yaml
+args:
+  - --dry-run=false
+  - --time-to-live=30d
+```
+
+This configuration deletes completed measurements that haven't been updated in 30 days.
+
+</Accordion>
+
+<Accordion title="exchanges-deletion-cronjob">
+
+**Purpose**: Deletes exchanges after a specified number of days.
+
+**Behavior**: Exchanges are deleted if:
+- The days since their exchange date exceeds `--days-to-live`
+
+**Default Schedule**: Daily at 6:40 AM
+
+**Example Configuration**:
+```yaml
+args:
+  - --dry-run=false
+  - --days-to-live=90
+```
+
+This configuration deletes exchanges older than 90 days from their exchange date.
+
+</Accordion>
+
+<Accordion title="pending-measurements-cancellation-cronjob">
+
+**Purpose**: Cancels measurements that remain in non-terminal states too long.
+
+**Behavior**: Measurements are transitioned to CANCELLED state if:
+- They are in a non-terminal state (PENDING, RUNNING, etc.)
+- The time since their creation exceeds the `--time-to-live` duration
+
+**Default Schedule**: Hourly at 45 minutes past the hour
+
+**Example Configuration**:
+```yaml
+args:
+  - --dry-run=false
+  - --time-to-live=7d
+```
+
+This configuration cancels measurements that have been pending for more than 7 days.
+
+</Accordion>
+
+## Modifying Retention CronJobs
+
+<Note>
+**Important**: Modifications to a CronJob only affect future Jobs. Currently running Jobs will not be updated.
+</Note>
+
+### Interactive Editing
+
+Use `kubectl edit` to modify a CronJob interactively:
+
+```bash
+kubectl edit cronjob exchanges-deletion-cronjob
+```
+
+This opens the CronJob configuration in your default text editor.
+
+### Configuration Paths
+
+When editing, modify these paths in the [`CronJobSpec`](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/cron-job-v1/#CronJobSpec):
+
+<Steps>
+
+<Step title="Update schedule">
+
+Path: `spec.schedule`
+
+```yaml
+spec:
+  schedule: "30 * * * *"  # Runs hourly at 30 minutes past
+```
+
+Use Cron syntax to specify the frequency.
+
+</Step>
+
+<Step title="Update retention flags">
+
+Path: `spec.jobTemplate.spec.template.spec.containers[0].args`
+
+```yaml
+args:
+  - --dry-run=false          # Enable actual operations
+  - --time-to-live=14d       # 14 days retention
+```
+
+</Step>
+
+</Steps>
+
+### Non-Interactive Patching
+
+For automated updates, use [`kubectl patch`](https://kubernetes.io/docs/tasks/manage-kubernetes-objects/update-api-object-kubectl-patch/):
+
+```bash
+# Update schedule
+kubectl patch cronjob exchanges-deletion-cronjob -p '{"spec":{"schedule":"0 2 * * *"}}'
+
+# Update dry-run flag
+kubectl patch cronjob completed-measurements-deletion-cronjob --type=json -p='[
+  {"op": "replace", "path": "/spec/jobTemplate/spec/template/spec/containers/0/args/0", "value": "--dry-run=false"}
+]'
+```
+
+## Duration Format Reference
+
+The `--time-to-live` flag uses human-readable duration format consisting of a sequence of decimal numbers with unit suffixes:
+
+| Suffix | Unit | Example |
+|--------|------|--------|
+| `d` | Days | `7d` = 7 days |
+| `h` | Hours | `24h` = 24 hours |
+| `m` | Minutes | `30m` = 30 minutes |
+| `s` | Seconds | `60s` = 60 seconds |
+| `ms` | Milliseconds | `500ms` = 500 milliseconds |
+| `ns` | Nanoseconds | `1000ns` = 1000 nanoseconds |
+
+### Examples
+
+```yaml
+# 3 hours and 50 minutes
+--time-to-live=3h50m
+
+# 30 days
+--time-to-live=30d
+
+# 1 day and 12 hours
+--time-to-live=1d12h
+
+# 90 days
+--time-to-live=90d
+```
+
+## Best Practices
+
+<Warning>
+**Testing Retention Policies**
+
+1. Always test in a non-production environment first
+2. Start with `--dry-run=true` to verify what would be deleted
+3. Review logs to ensure the policy targets the correct resources
+4. Gradually decrease retention periods based on storage needs
+</Warning>
+
+<Note>
+**Monitoring Retention Jobs**
+
+- Check CronJob execution history: `kubectl get jobs`
+- View job logs: `kubectl logs job/<job-name>`
+- Monitor deleted resource counts in job output
+- Set up alerts for failed retention jobs
+</Note>
+
+## Troubleshooting
+
+<Accordion title="CronJob not running">
+
+Check if the CronJob is suspended:
+
+```bash
+kubectl get cronjob <name> -o jsonpath='{.spec.suspend}'
+```
+
+If `true`, resume it:
+
+```bash
+kubectl patch cronjob <name> -p '{"spec":{"suspend":false}}'
+```
+
+</Accordion>
+
+<Accordion title="Retention job failing">
+
+View the job logs:
+
+```bash
+# Get the most recent job
+kubectl get jobs --sort-by=.metadata.creationTimestamp
+
+# View logs
+kubectl logs job/<job-name>
+```
+
+Common issues:
+- Insufficient permissions (RBAC)
+- Database connection errors
+- Invalid duration format
+
+</Accordion>
+
+<Accordion title="Verifying deletions">
+
+Check if resources are being deleted:
+
+```bash
+# Enable retention operations
+kubectl patch cronjob <name> -p '{"spec":{"jobTemplate":{"spec":{"template":{"spec":{"containers":[{"name":"<container-name>","args":["--dry-run=false","--time-to-live=30d"]}]}}}}}}'
+
+# Monitor the next job execution
+kubectl logs -f job/<next-job-name>
+```
+
+Look for deletion counts in the job output.
+
+</Accordion>

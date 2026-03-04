@@ -1,0 +1,279 @@
+---
+title: Certificate and Key Rotation
+description: Best practices for rotating TLS certificates, API certificates, and encryption keys in the Halo CMMS
+---
+
+Learn how to rotate leaf certificates and encryption keys in the Halo Cross-Media Measurement System. Rotation limits the risk of compromise by regularly changing cryptographic materials.
+
+## Background
+
+The Halo CMMS uses asymmetric cryptography for secure communication and data protection:
+
+- **X.509 certificates** for Transport Layer Security (TLS) and digital signatures
+- **Hybrid encryption** for encrypting sensitive data
+
+Each scheme has a public component (presented to recipients) and a private component (kept secret by the sender).
+
+### Certificate Trust Model
+
+The CMMS uses a private Certificate Authority (CA) model:
+
+<Steps>
+
+<Step title="Root certificates">
+
+Each entity operates their own private CA with a self-signed root certificate:
+
+- Very long validity period (e.g., 10 years)
+- Exchanged out-of-band between entities
+- Private key must be kept extremely secure
+
+<Warning>
+**Root Certificate Security**
+
+Root certificates are very difficult to rotate. The private key should be managed by a CA service such as:
+
+- Google Cloud Certificate Authority Service
+- AWS Private CA
+
+**Never** use OpenSSL as a CA in production - it's only suitable for testing.
+</Warning>
+
+</Step>
+
+<Step title="Certificate chains">
+
+The path from a leaf certificate to a trusted root is called a **certificate chain**. Validation includes:
+
+- Verifying the chain to a trust anchor
+- Checking the validity period (not expired)
+- Determining revocation status
+
+</Step>
+
+<Step title="Server TLS">
+
+For server TLS:
+
+- Server presents its certificate to the client
+- Server proves ownership via private key
+- Client verifies the certificate is signed by a trusted root
+- Client checks hostname matches Subject Alternative Name (SAN)
+
+</Step>
+
+<Step title="Mutual TLS (mTLS)">
+
+For mutual TLS (client authentication):
+
+- Client additionally presents its own certificate
+- Server verifies it's signed by a trusted root
+- Server uses the Authority Key Identifier (AKID) to map the certificate to the client's identity
+
+</Step>
+
+</Steps>
+
+### Asymmetric Encryption
+
+For hybrid encryption:
+
+1. Sender encrypts data using the recipient's public key
+2. Recipient decrypts data using their private key
+
+## TLS Certificate Rotation
+
+Rotate the certificate presented by the server (server TLS) or client (client TLS).
+
+### Kubernetes Secret Update
+
+In Kubernetes deployments, TLS certificates are stored in [`Secret`](https://kubernetes.io/docs/reference/kubernetes-api/config-and-storage-resources/secret-v1/) resources.
+
+<Steps>
+
+<Step title="Update certificate files">
+
+Overwrite the certificate and matching private key files in your Kustomization directory.
+
+</Step>
+
+<Step title="Apply changes">
+
+Run `kubectl apply` to update the Secret in your cluster:
+
+```bash
+kubectl apply -k path/to/kustomization
+```
+
+</Step>
+
+</Steps>
+
+<Note>
+See the [update guide](./release-updates) for more information on managing Kustomization directories.
+</Note>
+
+## API Certificate Rotation
+
+Rotating certificates used within the Halo public API requires two steps:
+
+<Steps>
+
+<Step title="Register new Certificate resource">
+
+Create a new [`Certificate` resource](https://github.com/world-federation-of-advertisers/cross-media-measurement-api/blob/main/src/main/proto/wfa/measurement/api/v2alpha/certificate.proto) by calling the [`CreateCertificate` method](https://github.com/world-federation-of-advertisers/cross-media-measurement-api/blob/main/src/main/proto/wfa/measurement/api/v2alpha/certificates_service.proto):
+
+```bash
+# Example using CLI tools
+./create-certificate \
+  --parent=dataProviders/abc123 \
+  --certificate-file=new_cert.pem
+```
+
+</Step>
+
+<Step title="Update PublicKey sub-resource">
+
+If the parent resource has a [`PublicKey` sub-resource](https://github.com/world-federation-of-advertisers/cross-media-measurement-api/blob/main/src/main/proto/wfa/measurement/api/v2alpha/public_key.proto), update it to reference the new Certificate:
+
+1. Sign the `EncryptionPublicKey` with the new certificate's private key
+2. Call the `UpdatePublicKey` method with the signed key
+
+<Note>
+You can rotate the encryption public key at the same time. See [Encryption Public Key Rotation](#encryption-public-key-rotation).
+</Note>
+
+</Step>
+
+</Steps>
+
+### CLI Tools
+
+Use the `MeasurementSystem` and `EncryptionPublicKeys` [CLI tools](https://github.com/world-federation-of-advertisers/cross-media-measurement/tree/main/src/main/kotlin/org/wfanet/measurement/api/v2alpha/tools) to assist with certificate rotation.
+
+## Encryption Public Key Rotation
+
+Rotate encryption keys by calling the [`UpdatePublicKey` method](https://github.com/world-federation-of-advertisers/cross-media-measurement-api/blob/main/src/main/proto/wfa/measurement/api/v2alpha/public_keys_service.proto).
+
+<Steps>
+
+<Step title="Generate new encryption key pair">
+
+Create a new hybrid encryption key pair using your cryptographic library.
+
+</Step>
+
+<Step title="Sign the public key">
+
+Generate a signature for the new encryption public key using the private key that matches your `Certificate` resource.
+
+</Step>
+
+<Step title="Update via API">
+
+Call `UpdatePublicKey` with the new signed encryption public key.
+
+</Step>
+
+</Steps>
+
+<Note>
+Use the `MeasurementSystem` and `EncryptionPublicKeys` CLI tools to streamline this process.
+</Note>
+
+## Handling Compromise
+
+If a certificate or encryption key has been compromised, simple rotation is not sufficient. Additional mitigation steps are required.
+
+### Certificate Compromise
+
+<Warning>
+**Impact**: All digital signatures using the compromised certificate must be considered invalid. This is similar to certificate expiration.
+</Warning>
+
+For example, Measurement results utilizing the compromised certificate can no longer be trusted. New Measurements may need to be created to obtain trustable results.
+
+#### Mitigation Steps
+
+<Steps>
+
+<Step title="Revoke the certificate">
+
+Prevents use of the certificate for anything new:
+
+1. Update the `Certificate` resource revocation status
+2. Call the `RevokeCertificate` method
+
+```bash
+# Example revocation
+./revoke-certificate \
+  --name=dataProviders/abc123/certificates/xyz789 \
+  --revocation-state=REVOKED
+```
+
+</Step>
+
+<Step title="Rotate to new certificate">
+
+Follow the [API Certificate Rotation](#api-certificate-rotation) steps to deploy a new certificate.
+
+</Step>
+
+<Step title="Assess impact">
+
+Determine which data and operations were signed with the compromised certificate and take appropriate action.
+
+</Step>
+
+</Steps>
+
+### Encryption Key Compromise
+
+<Warning>
+**Impact**: All data encrypted with the compromised key is no longer private to the intended recipient.
+</Warning>
+
+#### Mitigation Steps
+
+<Steps>
+
+<Step title="Re-encrypt data with new key">
+
+For example, if a `MeasurementConsumer` key was compromised:
+
+- Request that `DataProvider`s re-encrypt any `EventGroup` metadata
+- Update all ongoing measurements to use the new key
+
+</Step>
+
+<Step title="Limit access to ciphertexts">
+
+For immutable encrypted data (e.g., `RequisitionSpec` or `Measurement.Result`):
+
+- Further restrict access to the encrypted data
+- Consider deleting the data based on risk assessment
+- Contact the Kingdom operator to delete Measurements using the internal API if necessary
+
+</Step>
+
+</Steps>
+
+## Rotation Best Practices
+
+<Note>
+**Regular Rotation Schedule**
+
+- Establish a regular rotation schedule (e.g., every 90 days for certificates, every 30 days for encryption keys)
+- Automate rotation where possible
+- Maintain an audit trail of all rotations
+- Test rotation procedures in non-production environments first
+</Note>
+
+<Warning>
+**Planning for Rotation**
+
+- Ensure all parties have updated trust stores before rotating
+- Coordinate rotation windows with all participants
+- Have rollback procedures ready
+- Monitor for authentication failures after rotation
+</Warning>

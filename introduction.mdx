@@ -1,0 +1,173 @@
+---
+title: Introduction to Halo CMMS
+description: Overview of the Halo Cross-Media Measurement System and its privacy-preserving capabilities
+---
+
+## What is Halo CMMS?
+
+The Halo Cross-Media Measurement System (CMMS) is a privacy-centric system for cross-publisher, cross-media advertising measurement through secure multiparty computations. Built by the [World Federation of Advertisers](https://wfanet.org), it enables advertisers to measure campaign reach and frequency across multiple publishers and media channels while preserving user privacy.
+
+<Note>
+  Halo CMMS uses cryptographic techniques and secure multiparty computation (MPC) to ensure that no single party can access individual user data, while still generating accurate aggregate measurements.
+</Note>
+
+## Why Halo CMMS?
+
+### Privacy-First Architecture
+
+The system is designed from the ground up with privacy as a core principle:
+
+- **No Single Point of Data Access**: Encrypted data is distributed across multiple independent organizations (Duchies)
+- **Multiparty Computation**: All Duchies must participate in computations, preventing any single party from accessing raw data
+- **Differential Privacy**: Statistical noise is added to results to protect individual user privacy
+- **Encrypted Sketches**: Publishers encrypt measurement data using the combined public key of all Duchies
+
+### Key Use Cases
+
+Halo CMMS enables advertisers to:
+
+<CardGroup cols={2}>
+  <Card title="Cross-Publisher Reach" icon="chart-line">
+    Measure unique reach across multiple publishers without sharing user-level data
+  </Card>
+  <Card title="Frequency Distribution" icon="chart-histogram">
+    Understand how often users see ads across different platforms and campaigns
+  </Card>
+  <Card title="Cross-Media Measurement" icon="tv">
+    Combine measurements from digital, TV, and other media channels
+  </Card>
+  <Card title="Campaign Analytics" icon="bullseye">
+    Generate privacy-safe reports spanning multiple campaigns and time periods
+  </Card>
+</CardGroup>
+
+## How It Works: High-Level Overview
+
+<Steps>
+  <Step title="Advertisers Configure Reports">
+    Measurement consumers (advertisers) configure reports that may span various campaigns, publishers, and media types through the Kingdom API.
+  </Step>
+  
+  <Step title="Kingdom Manages Requisitions">
+    The Kingdom determines which data is required and creates requisitions for publishers. It tracks fulfillment status and orchestrates the overall workflow.
+  </Step>
+  
+  <Step title="Publishers Submit Encrypted Data">
+    Publishers compute encrypted sketches (similar to HyperLogLog for cardinality estimation) and encrypt them using the combined public key of all Duchies. These sketches are sent to a Duchy for storage.
+  </Step>
+  
+  <Step title="Secure Multiparty Computation">
+    When all requisitions for a measurement are fulfilled, Duchies perform secure multiparty computation in a predetermined order. Each Duchy holds part of the decryption key, so all must participate.
+  </Step>
+  
+  <Step title="Results Returned">
+    The final decrypted results are sent back to the Kingdom and made available to the advertiser who requested the measurement.
+  </Step>
+</Steps>
+
+## Privacy-Preserving Measurement
+
+The system employs multiple privacy-protection techniques:
+
+### Secure Multiparty Computation (MPC)
+
+Data is encrypted with a threshold encryption scheme where the private key is distributed across all Duchies. No single Duchy can decrypt data on its own. Computations proceed through two rounds:
+
+1. **First Round**: Each Duchy shuffles the encrypted sketches to destroy information that could be reconstructed from register indices
+2. **Second Round**: Duchies each use their piece of the private key to progressively decrypt the results
+
+### Differential Privacy
+
+The system adds calibrated statistical noise to measurement results to provide formal privacy guarantees. This ensures that individual user data cannot be inferred from the aggregate results, even when combined with external information.
+
+<Info>
+  For a deeper understanding of differential privacy, see the included research papers:
+  - [Privacy-Preserving Secure Cardinality and Frequency Estimation](https://research.google/pubs/pub49177/)
+  - [A System Design for Privacy-Preserving Reach and Frequency Estimation](https://research.google/pubs/pub49526/)
+</Info>
+
+### Multi-Cloud Deployment
+
+For additional security, Duchies should be operated by independent organizations and deployed across different cloud providers. This prevents any single cloud provider from accessing all components of the system.
+
+## System Components
+
+The Halo CMMS consists of three main deployment types:
+
+<CardGroup cols={3}>
+  <Card title="Kingdom" icon="crown">
+    Single controller deployment that manages report configuration, requisitions, and result delivery. See [System Components](/system-components) for details.
+  </Card>
+  <Card title="Duchies" icon="shield">
+    At least two independent secure computation nodes, each operated by a different organization. See [Architecture](/architecture) for the computation flow.
+  </Card>
+  <Card title="Data Providers" icon="database">
+    Publishers and media companies that fulfill requisitions by submitting encrypted measurement data.
+  </Card>
+</CardGroup>
+
+## Supported Protocols
+
+Halo CMMS implements multiple secure computation protocols:
+
+- **Liquid Legions v2 (LLv2)**: Full reach and frequency measurement protocol
+- **Reach-Only Liquid Legions v2**: Optimized protocol for reach-only measurements
+- **Honest Majority Share Shuffle (HMSS)**: Alternative protocol with different security assumptions
+
+## Benefits
+
+<AccordionGroup>
+  <Accordion title="For Advertisers">
+    - Measure campaign effectiveness across publishers without requiring data sharing
+    - Gain insights into cross-media reach and frequency
+    - Comply with privacy regulations while maintaining measurement capabilities
+    - Standardized measurement across the industry
+  </Accordion>
+  
+  <Accordion title="For Publishers">
+    - Participate in cross-publisher measurement without sharing user data
+    - Maintain user privacy and comply with regulations
+    - Support advertiser measurement needs without sacrificing privacy principles
+    - No need to trust a single centralized entity
+  </Accordion>
+  
+  <Accordion title="For Users">
+    - Strong privacy protections through cryptographic guarantees
+    - No single party can access individual user data
+    - Differential privacy ensures aggregate data cannot reveal individual behavior
+    - Transparent, open-source implementation
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+To get started with Halo CMMS:
+
+<CardGroup cols={2}>
+  <Card title="Understand the Architecture" icon="sitemap" href="/architecture">
+    Learn about the system architecture and how components interact
+  </Card>
+  <Card title="Explore System Components" icon="cubes" href="/system-components">
+    Detailed breakdown of Kingdom and Duchy services
+  </Card>
+  <Card title="Deploy a Kingdom" icon="server" href="/deployment/kingdom-gke">
+    Step-by-step guide to deploying a Kingdom on GKE
+  </Card>
+  <Card title="Deploy a Duchy" icon="shield" href="/deployment/duchy-gke">
+    Instructions for setting up a Duchy deployment
+  </Card>
+</CardGroup>
+
+## Open Source
+
+Halo CMMS is open source and available on [GitHub](https://github.com/world-federation-of-advertisers/cross-media-measurement). The project welcomes contributions and is built using modern technologies including:
+
+- **Kotlin** for business logic and services
+- **gRPC** for inter-service communication
+- **Kubernetes** for orchestration
+- **C++** for cryptographic operations
+- **Bazel** for build management
+
+<Tip>
+  Container images are signed using cosign for security. Release images are available at the [GitHub Container Registry](https://github.com/orgs/world-federation-of-advertisers/packages?repo_name=cross-media-measurement).
+</Tip>

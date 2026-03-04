@@ -1,0 +1,452 @@
+---
+title: "Protocol Cryptography"
+description: "Cryptographic primitives and protocols used in secure multiparty computation"
+---
+
+## Overview
+
+The Halo Cross-Media Measurement System uses advanced cryptographic protocols to enable secure computation over encrypted data. This page describes the cryptographic building blocks, key management, encryption schemes, and protocol phases that make privacy-preserving measurement possible.
+
+<Info>
+All cryptographic operations are implemented in C++ for performance, with Java JNI wrappers for integration with the Kotlin codebase.
+</Info>
+
+## Cryptographic Primitives
+
+The system relies on several fundamental cryptographic components:
+
+### Elliptic Curve Cryptography
+
+All public-key operations use **elliptic curves** over finite fields:
+
+<Tabs>
+  <Tab title="Curve Selection">
+    The system typically uses **NIST P-256** (secp256r1):
+    
+    - 256-bit security level
+    - Widely supported and standardized
+    - Efficient implementations available
+    - Suitable for ElGamal encryption
+    
+    Other curves may be supported based on deployment requirements.
+  </Tab>
+  
+  <Tab title="Point Operations">
+    Key operations on elliptic curve points:
+    
+    - **Point addition**: `P + Q` (group operation)
+    - **Scalar multiplication**: `k · P` (efficient via double-and-add)
+    - **Hashing to curve**: Map arbitrary data to curve points
+    - **Point serialization**: Convert points to byte strings
+    
+    Implementation: `src/main/cc/wfa/measurement/common/crypto/ec_point_util.h`
+  </Tab>
+</Tabs>
+
+### ElGamal Encryption
+
+**ElGamal** is the primary encryption scheme used throughout the protocol:
+
+#### Key Generation
+
+Each Duchy generates an ElGamal key pair:
+
+```
+Private key: x ∈ ℤ_q (random scalar)
+Public key: Y = x · G (curve point, where G is the generator)
+```
+
+#### Encryption
+
+To encrypt a message `m` (represented as a curve point `M`):
+
+```
+1. Choose random r ∈ ℤ_q
+2. Compute C₁ = r · G
+3. Compute C₂ = M + r · Y
+4. Ciphertext = (C₁, C₂)
+```
+
+#### Decryption
+
+With private key `x`:
+
+```
+M = C₂ - x · C₁
+```
+
+#### Homomorphic Properties
+
+ElGamal is **additively homomorphic**:
+
+```
+Enc(M₁) ⊕ Enc(M₂) = Enc(M₁ + M₂)
+```
+
+This property enables operations on encrypted data without decryption, which is essential for the MPC protocol.
+
+<Note>
+**Implementation**: The `ProtocolCryptor` class (`src/main/cc/wfa/measurement/common/crypto/protocol_cryptor.h`) provides methods for encryption, decryption, and homomorphic operations.
+</Note>
+
+### Pohlig-Hellman Cipher
+
+A **deterministic encryption scheme** used for blinding operations:
+
+- Each Duchy maintains a local Pohlig-Hellman private key
+- Used during the "blind" operation: decrypt one layer of ElGamal, encrypt with Pohlig-Hellman
+- Enables shuffling while maintaining unlinkability
+
+**Properties**:
+- Deterministic (same plaintext → same ciphertext with same key)
+- Used temporarily during protocol execution
+- Removed in later stages via decryption
+
+## Key Management
+
+The system employs a sophisticated multi-key encryption scheme:
+
+### Composite Public Key
+
+Publishers encrypt data using a **composite public key** formed from all Duchy public keys:
+
+<Steps>
+  <Step title="Duchy Key Generation">
+    Each Duchy `i` generates:
+    - ElGamal private key: `xᵢ`
+    - ElGamal public key: `Yᵢ = xᵢ · G`
+  </Step>
+  
+  <Step title="Key Aggregation">
+    The Kingdom combines public keys:
+    
+    ```
+    Composite Public Key = Y₁ + Y₂ + ... + Yₙ
+    ```
+    
+    This is a single curve point representing the combined public key.
+  </Step>
+  
+  <Step title="Publisher Encryption">
+    Publishers encrypt sketches using the composite key:
+    
+    - Encryption with composite key = encryption under all Duchy keys simultaneously
+    - Requires all Duchies to partially decrypt
+  </Step>
+  
+  <Step title="Distributed Decryption">
+    Each Duchy performs partial decryption:
+    
+    ```
+    Duchy i: C₂' = C₂ - xᵢ · C₁
+    ```
+    
+    After all Duchies decrypt: `M = C₂' - (x₁ + x₂ + ... + xₙ) · C₁`
+  </Step>
+</Steps>
+
+### Partial vs. Full Composite Keys
+
+The system uses two types of composite keys:
+
+| Key Type | Composition | Use Case |
+|----------|-------------|----------|
+| **Full Composite** | All Duchy public keys | Initial publisher encryption |
+| **Partial Composite** | Subset of Duchy keys | Re-encryption during protocol |
+
+**Partial composite keys** exclude certain Duchies' keys, used during intermediate protocol stages.
+
+### Key Storage and Security
+
+<Warning>
+**Security Critical**: 
+- Private keys never leave the Duchy that generated them
+- Keys are stored in secure key management systems (KMS)
+- Each computation may use ephemeral keys (generated per measurement)
+- Keys must be securely deleted after computation completes
+</Warning>
+
+## Protocol Cryptographic Operations
+
+The MPC protocol consists of multiple phases, each using specific cryptographic operations:
+
+### Initialization Phase
+
+<Accordion title="Key Exchange">
+**Purpose**: Establish cryptographic keys for the computation
+
+**Operations**:
+1. Each Duchy generates a fresh ElGamal key pair
+2. Public keys are sent to the Kingdom
+3. Kingdom computes and distributes the composite public key
+4. Publishers fetch the composite key to encrypt their sketches
+
+**Security**: Public key exchange is authenticated but need not be confidential.
+</Accordion>
+
+### Setup Phase
+
+<Accordion title="Noise Addition and Aggregation">
+**Purpose**: Combine publisher sketches and add distributed noise
+
+**Operations**:
+
+**Non-Aggregator Duchies**:
+1. Retrieve local fulfilled requisitions (encrypted sketches)
+2. Add distributed differential privacy noise:
+   - Generate random noise registers
+   - Encrypt noise values using composite key
+   - Combine with publisher sketches
+3. Send noised Combined Register Vector (CRV) to aggregator
+
+**Aggregator Duchy**:
+1. Collect CRVs from all non-aggregator Duchies
+2. Add its own noise to its local CRV
+3. Merge all CRVs into a global CRV:
+   - For each register index, collect all (key, count) tuples
+   - Result is a multi-set of encrypted tuples per register
+
+**Cryptographic operations**:
+- `EncryptCompositeElGamal()`: Encrypt noise values
+- Homomorphic addition: Combine encrypted sketches
+</Accordion>
+
+### Execution Phase One: Shuffle and Join
+
+<Accordion title="Shuffling">
+**Purpose**: Destroy positional information to prevent linking
+
+**Non-Aggregator Duchies**:
+1. **Blind** operation on each register:
+   ```
+   Blind(C₁, C₂) = 
+     - Decrypt one ElGamal layer: M' = C₂ - x · C₁
+     - Encrypt with Pohlig-Hellman: C' = PH_encrypt(M')
+   ```
+2. Re-randomize other ciphertext components
+3. Apply random permutation to register order
+4. Send shuffled CRV to next Duchy in the ring
+
+**Aggregator Duchy**:
+1. Receives shuffled CRV from last non-aggregator
+2. Performs **Same Key Aggregation** (SKA):
+   - Group registers by their (blinded) key values
+   - Combine counts for matching keys using homomorphic addition
+   - Result: One (flag, count) tuple per unique user
+3. Add additional noise for differential privacy
+
+**Cryptographic operations**:
+- `Blind()`: ElGamal decrypt + Pohlig-Hellman encrypt
+- `ReRandomize()`: Add encryption of zero to hide previous randomness
+- Shuffle: Cryptographically secure permutation
+</Accordion>
+
+<Accordion title="Same Key Aggregation (SKA)">
+**Purpose**: Join encrypted keys representing the same user
+
+**How it works**:
+1. Encrypted keys have been blinded (deterministically encrypted)
+2. Identical plaintext keys → identical blinded ciphertexts
+3. Group by blinded key value (possible because deterministic)
+4. For each group:
+   - Combine counts: `Σ Count_i` (using homomorphic addition)
+   - Create flag value indicating group size
+5. Re-encrypt everything for next phase
+
+**Mathematical foundation**:
+- Uses ElGamal homomorphism: `Enc(a) + Enc(b) = Enc(a + b)`
+- Destructors identify registers to discard vs. preserve
+- See "Privacy-Preserving Secure Cardinality" research paper for details
+</Accordion>
+
+### Execution Phase Two: Decrypt Flags
+
+<Accordion title="Partial Decryption Round">
+**Purpose**: Decrypt flag values to identify valid vs. noise registers
+
+**All Duchies (in ring order)**:
+1. Receive flag-count tuples from previous Duchy
+2. **Partial decrypt** flag values:
+   ```
+   C₂' = C₂ - xᵢ · C₁
+   ```
+3. Pass partially decrypted data to next Duchy
+
+**Aggregator (final step)**:
+1. Completes final decryption of flags
+2. Filters out differential privacy noise registers
+3. Estimates reach from remaining valid registers
+4. Constructs 2-D frequency matrix from count values (still encrypted)
+
+**Cryptographic operations**:
+- `DecryptLocalElGamal()`: Partial decryption with local private key
+- `IsDecryptLocalElGamalResultZero()`: Check if decrypted value is identity element
+</Accordion>
+
+### Execution Phase Three: Decrypt Counts
+
+<Accordion title="Frequency Decryption">
+**Purpose**: Decrypt count values to compute frequency distribution
+
+**All Duchies (in ring order)**:
+1. Receive 2-D frequency matrix (counts still encrypted)
+2. Partial decrypt count values using local private key
+3. Pass to next Duchy
+
+**Aggregator (final step)**:
+1. Completes decryption of all count values
+2. Aggregates frequency distribution:
+   ```
+   Freq[k] = number of users seen k times
+   ```
+3. Applies final differential privacy noise to frequency estimates
+4. Returns reach and frequency results to Kingdom
+
+**Cryptographic operations**:
+- `DecryptLocalElGamal()`: Partial decryption
+- Frequency aggregation: Summing counts at each frequency level
+</Accordion>
+
+## Cryptographic Implementation
+
+The core cryptography is implemented in C++ with JNI wrappers:
+
+### C++ Cryptography Library
+
+Key files in `src/main/cc/wfa/measurement/common/crypto/`:
+
+- **`protocol_cryptor.h`**: Main interface for cryptographic operations
+  - Encryption/decryption methods
+  - Blinding and re-randomization
+  - Batch processing for performance
+  
+- **`ec_point_util.h`**: Elliptic curve point operations
+  - Point addition and scalar multiplication
+  - Serialization and deserialization
+  - Hashing to curve
+  
+- **`encryption_utility_helper.h`**: Helper functions for Liquid Legions
+  - Extract key-count pairs from encrypted registers
+  - Write encrypted values to byte strings
+  - Batch encryption operations
+
+### Protocol Cryptor Interface
+
+The `ProtocolCryptor` class provides these key methods:
+
+```cpp
+// Encryption operations
+EncryptCompositeElGamal(plaintext, composite_type) → ciphertext
+EncryptPlaintextCompositeElGamal(plaintext, composite_type) → ciphertext
+
+// Decryption operations
+DecryptLocalElGamal(ciphertext) → plaintext
+
+// Blinding and re-randomization
+Blind(ciphertext) → blinded_ciphertext
+ReRandomize(ciphertext, composite_type) → randomized_ciphertext
+
+// Hashing
+MapToCurve(data) → curve_point
+
+// Batch processing
+BatchProcess(data, actions[], pos, result)
+```
+
+**Thread safety**: `ProtocolCryptor` instances are NOT thread-safe. For parallel processing, create multiple independent instances using `CreateIdenticalProtocolCryptors()`.
+
+### JNI Wrappers
+
+The C++ library is wrapped for use in Kotlin/Java:
+
+- **SWIG definitions**: `src/main/swig/protocol/liquidlegionsv2/`
+- **Generated wrappers**: Auto-generated Java classes with JNI bindings
+- **Usage**: Called from Kotlin mill job implementations
+
+See `src/main/swig/protocol/liquidlegionsv2/README.md` for build instructions.
+
+## Liquid Legions V2 Protocol
+
+The primary protocol implementation is **Liquid Legions V2**:
+
+### Protocol Stages
+
+Defined in `liquid_legions_sketch_aggregation_v2.proto`:
+
+1. `INITIALIZATION_PHASE`: Key generation
+2. `WAIT_REQUISITIONS_AND_KEY_SET`: Waiting for data and keys
+3. `CONFIRMATION_PHASE`: Validate signatures and keys
+4. `WAIT_TO_START` / `WAIT_SETUP_PHASE_INPUTS`: Synchronization
+5. `SETUP_PHASE`: Noise addition and aggregation
+6. `EXECUTION_PHASE_ONE`: Shuffle and join
+7. `EXECUTION_PHASE_TWO`: Decrypt flags and estimate reach
+8. `EXECUTION_PHASE_THREE`: Decrypt counts and compute frequency
+9. `COMPLETE`: Final results returned
+
+Each stage has specific cryptographic operations defined in the protocol specification.
+
+### Encryption Methods
+
+Specific encryption operations are defined in:
+- `liquid_legions_v2_encryption_methods.proto`: Standard Liquid Legions V2
+- `reach_only_liquid_legions_v2_encryption_methods.proto`: Optimized reach-only variant
+
+### Alternative Protocols
+
+Other protocols are also implemented:
+
+- **Honest Majority Share Shuffle**: Alternative MPC protocol with different trust assumptions
+- **Reach-Only Liquid Legions V2**: Optimized version when only reach (not frequency) is needed
+
+## Security Considerations
+
+<Warning>
+**Critical Security Properties**:
+
+1. **Key Generation**: Use cryptographically secure random number generators
+2. **Key Storage**: Private keys must never be exposed or logged
+3. **Side Channels**: Implementations must avoid timing attacks
+4. **Secure Deletion**: Keys and intermediate values must be securely wiped
+5. **Protocol Verification**: Each Duchy should verify correctness of received data
+</Warning>
+
+### Cryptographic Assumptions
+
+The security of the system relies on:
+
+- **Discrete Logarithm Problem (DLP)**: Hard to compute `x` from `x · G`
+- **Decisional Diffie-Hellman (DDH)**: ElGamal semantic security
+- **Elliptic Curve Security**: Chosen curve provides adequate security level
+- **Random Number Generation**: Secure RNG for key generation and randomization
+
+### Post-Quantum Considerations
+
+<Note>
+**Future-proofing**: Current elliptic curve cryptography is vulnerable to quantum computers. Migrating to post-quantum secure primitives (e.g., lattice-based encryption) may be necessary as quantum computing advances.
+</Note>
+
+## Research References
+
+The cryptographic protocols are detailed in:
+
+<CardGroup cols={2}>
+  <Card title="System Design Paper" href="https://research.google/pubs/pub49526/">
+    High-level architecture and security model
+  </Card>
+  
+  <Card title="Cardinality Estimation" href="https://research.google/pubs/pub49177/">
+    Detailed cryptographic protocol specifications
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Secure Computation" href="/concepts/secure-computation">
+    Understand how Duchies orchestrate the cryptographic protocol
+  </Card>
+  
+  <Card title="Sketches" href="/concepts/sketches">
+    Learn about the data structures that are encrypted and processed
+  </Card>
+</CardGroup>

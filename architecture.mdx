@@ -1,0 +1,437 @@
+---
+title: System Architecture
+description: Detailed architecture of the Halo Cross-Media Measurement System including Kingdom and Duchy components
+---
+
+## Architectural Overview
+
+The Halo Cross-Media Measurement System employs a distributed architecture with clear separation of concerns between coordination (Kingdom) and secure computation (Duchies). This design ensures that no single entity can access raw measurement data while still enabling accurate aggregate measurements.
+
+## Core Architecture Principles
+
+<CardGroup cols={2}>
+  <Card title="Separation of Duties" icon="split">
+    Kingdom coordinates workflow; Duchies perform secure computation
+  </Card>
+  <Card title="Threshold Cryptography" icon="key">
+    Distributed private key requires all Duchies to participate
+  </Card>
+  <Card title="Independent Operations" icon="building">
+    Each Duchy operated by different organization
+  </Card>
+  <Card title="Multi-Cloud Security" icon="cloud">
+    Duchies deployed across different cloud providers
+  </Card>
+</CardGroup>
+
+## System Topology
+
+At a high level, the system requires at least three independent deployments:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         KINGDOM                             │
+│  ┌────────────────────────────────────────────────────┐    │
+│  │ • Report Configuration                              │    │
+│  │ • Requisition Management                            │    │
+│  │ • Workflow Orchestration                            │    │
+│  │ • Result Distribution                               │    │
+│  └────────────────────────────────────────────────────┘    │
+│         │                                                    │
+│         │ System API (v1alpha)                              │
+│         │ Public API (v2alpha)                              │
+└─────────┼────────────────────────────────────────────────────┘
+          │
+          ├────────────────┬─────────────────┬────────────────
+          │                │                 │
+    ┌─────▼─────┐    ┌─────▼─────┐    ┌─────▼─────┐
+    │  DUCHY 1  │    │  DUCHY 2  │    │  DUCHY 3  │
+    │ (Worker1) │    │ (Worker2) │    │ (Worker3) │
+    ├───────────┤    ├───────────┤    ├───────────┤
+    │ • Storage │    │ • Storage │    │ • Storage │
+    │ • Mill    │    │ • Mill    │    │ • Mill    │
+    │ • Herald  │    │ • Herald  │    │ • Herald  │
+    │ • Key 1/3 │    │ • Key 2/3 │    │ • Key 3/3 │
+    └───────────┘    └───────────┘    └───────────┘
+          ▲                ▲                 ▲
+          │                │                 │
+          └────────┬───────┴─────────┬───────┘
+                   │                 │
+           ┌───────▼─────┐   ┌───────▼─────┐
+           │  Publisher  │   │  Publisher  │
+           │  (EDP 1)    │   │  (EDP 2)    │
+           └─────────────┘   └─────────────┘
+```
+
+## The Kingdom
+
+The **Kingdom** is a single deployment that serves as the control plane for the measurement system.
+
+### Kingdom Responsibilities
+
+<Steps>
+  <Step title="Report Configuration">
+    Advertisers (measurement consumers) configure reports through the Kingdom's public API, specifying campaigns, time ranges, and measurement types.
+  </Step>
+  
+  <Step title="Requisition Management">
+    The Kingdom determines which data is required from publishers and compiles requisitions. It tracks which requisitions are open and which are fulfilled.
+  </Step>
+  
+  <Step title="Computation Coordination">
+    The Kingdom determines when measurements are ready to compute (all requisitions fulfilled) and assigns work to Duchies.
+  </Step>
+  
+  <Step title="Result Delivery">
+    Once computations complete, the Kingdom receives results from Duchies and makes them accessible to advertisers.
+  </Step>
+</Steps>
+
+### Kingdom Services
+
+The Kingdom deployment includes:
+
+- **Public API Server (v2alpha)**: External-facing API for measurement consumers
+- **System API Server (v1alpha)**: System-level API for Duchies and internal services
+- **Internal Data Server**: Kingdom's internal database access layer
+- **Batch Jobs**: Periodic cleanup and maintenance tasks
+
+See [System Components](/system-components) for detailed service descriptions.
+
+## The Duchies
+
+The **Duchies** are at least two (typically three or more) separate deployments, each operated by an independent organization. They store encrypted data and perform the secure multiparty computations required to generate measurements.
+
+<Warning>
+  For security, Duchies should be multi-cloud with at least one Duchy deploying to a different cloud provider than the others. This prevents any single cloud provider from gaining access to all components.
+</Warning>
+
+### Duchy Responsibilities
+
+- **Encrypted Data Storage**: Store encrypted sketches submitted by publishers
+- **Secure Computation**: Participate in multi-round computation protocols
+- **Partial Key Management**: Hold one piece of the distributed private key
+- **Workflow Execution**: Poll Kingdom for work and execute computation stages
+
+### Key Duchy Components
+
+<Accordion title="Herald Daemon">
+  Polls the Kingdom to claim pending computations that are ready to execute. Determines which measurements have all necessary requisitions fulfilled and starts the computation workflow.
+</Accordion>
+
+<Accordion title="Mill (Computation Engine)">
+  Executes the actual secure computation protocols. Different mill implementations exist for different protocols:
+  - **Liquid Legions v2 Mill**: Full reach and frequency measurements
+  - **HMSS Mill**: Honest Majority Share Shuffle protocol
+  - **Trustee Mill**: Handles key generation and management
+</Accordion>
+
+<Accordion title="Computation Control Service">
+  Manages the state machine for computations, coordinating the multi-stage computation process across Duchies.
+</Accordion>
+
+<Accordion title="Requisition Fulfillment Service">
+  Public API that publishers use to submit encrypted sketches and fulfill requisitions.
+</Accordion>
+
+## Data Flow Architecture
+
+The following describes how data flows through the system from report creation to result delivery:
+
+### Phase 1: Report Configuration
+
+```kotlin
+// Advertiser creates a measurement via Kingdom Public API
+Measurement {
+  measurement_consumer = "advertisers/alice"
+  event_groups = ["publishers/bob/eventGroups/1", "publishers/carol/eventGroups/2"]
+  measurement_spec {
+    reach_and_frequency { ... }
+  }
+}
+```
+
+<Steps>
+  <Step title="Measurement Creation">
+    Advertiser submits measurement request to Kingdom specifying event groups and measurement type (reach, frequency, etc.)
+  </Step>
+  
+  <Step title="Requisition Generation">
+    Kingdom analyzes the request and generates requisitions for each publisher, specifying exactly what data is needed
+  </Step>
+</Steps>
+
+### Phase 2: Data Collection
+
+<Steps>
+  <Step title="Requisition Retrieval">
+    Publishers query the Duchy API to retrieve their pending requisitions (proxied from Kingdom)
+  </Step>
+  
+  <Step title="Sketch Computation">
+    Publishers compute encrypted sketches using algorithms similar to HyperLogLog for cardinality and frequency estimation. These sketches contain aggregated, encrypted representations of user events.
+  </Step>
+  
+  <Step title="Encryption">
+    Publishers encrypt sketches using the **combined public key** of all Duchies. This threshold encryption scheme means only the collective Duchies can decrypt.
+  </Step>
+  
+  <Step title="Submission">
+    Publishers send encrypted sketches to a Duchy (can be distributed across Duchies). The Duchy stores them and notifies the Kingdom that the requisition is fulfilled.
+  </Step>
+</Steps>
+
+<Info>
+  The sketch-based approach allows efficient storage and computation while preserving privacy. Instead of storing individual events, publishers create compact probabilistic data structures that support the required measurements.
+</Info>
+
+### Phase 3: Secure Multiparty Computation
+
+Once all requisitions are fulfilled, the actual computation begins:
+
+<Steps>
+  <Step title="Work Assignment">
+    Kingdom marks the computation as ready. Duchy Herald daemons poll the Kingdom and claim the work. One Duchy is designated as the "Primary Duchy" for this computation.
+  </Step>
+  
+  <Step title="Sketch Collection">
+    All Duchies fetch the required encrypted sketches from storage. Each Duchy interleaves noise into the sketches (for differential privacy) and sends them to the Primary Duchy.
+  </Step>
+  
+  <Step title="Sketch Combination">
+    The Primary Duchy combines all encrypted sketches with noise into a unified encrypted dataset.
+  </Step>
+  
+  <Step title="Round 1: Shuffle">
+    Computation makes the first round through all Duchies in deterministic order. Each Duchy shuffles the encrypted sketches to destroy information about register indices that could leak data.
+  </Step>
+  
+  <Step title="Round 2: Decrypt">
+    Computation makes the second round through all Duchies. Each Duchy uses its piece of the distributed private key to partially decrypt the results. After all Duchies complete this step, the data is fully decrypted.
+  </Step>
+  
+  <Step title="Result Return">
+    The Primary Duchy sends the final decrypted, noised results back to the Kingdom.
+  </Step>
+</Steps>
+
+### Visual: Computation Flow
+
+```
+Phase 1: Sketch Collection
+┌─────────┐     ┌─────────┐     ┌─────────┐
+│ Duchy 1 │     │ Duchy 2 │     │ Duchy 3 │
+│ Get     │────▶│         │     │         │
+│ Sketches│     │         │     │         │
+└────┬────┘     └────┬────┘     └────┬────┘
+     │ Add noise     │ Add noise     │ Add noise
+     └───────────────┼───────────────┘
+                     │ Send all to Primary (Duchy 2)
+              ┌──────▼──────┐
+              │  Duchy 2    │
+              │  (Primary)  │
+              │  Combine    │
+              └─────────────┘
+
+Phase 2: Round 1 - Shuffle
+┌─────────┐     ┌─────────┐     ┌─────────┐
+│ Duchy 1 │────▶│ Duchy 2 │────▶│ Duchy 3 │
+│ Shuffle │     │ Shuffle │     │ Shuffle │
+└─────────┘     └─────────┘     └─────────┘
+                                      │
+                              ┌───────▼──────┐
+                              │   Duchy 2    │
+                              │  (Primary)   │
+                              └──────────────┘
+
+Phase 3: Round 2 - Decrypt
+┌─────────┐     ┌─────────┐     ┌─────────┐
+│ Duchy 1 │────▶│ Duchy 2 │────▶│ Duchy 3 │
+│ Decrypt │     │ Decrypt │     │ Decrypt │
+│ (Key 1) │     │ (Key 2) │     │ (Key 3) │
+└─────────┘     └─────────┘     └────┬────┘
+                                     │
+                              ┌──────▼──────┐
+                              │   Duchy 2   │
+                              │  (Primary)  │
+                              │   Result    │
+                              └──────┬──────┘
+                                     │
+                              ┌──────▼──────┐
+                              │   Kingdom   │
+                              └─────────────┘
+```
+
+## Secure Multiparty Computation Protocols
+
+Halo CMMS implements multiple MPC protocols, each with different performance and security characteristics:
+
+### Liquid Legions v2 (LLv2)
+
+The primary protocol for full reach and frequency measurements:
+
+- **Use Case**: Complete frequency histograms and reach measurements
+- **Rounds**: Two rounds through all Duchies
+- **Security**: Threshold encryption with noise injection
+- **Performance**: Suitable for most production workloads
+
+### Reach-Only Liquid Legions v2
+
+Optimized variant for reach-only measurements:
+
+- **Use Case**: When only unique reach is needed (no frequency distribution)
+- **Optimization**: Reduced computation complexity
+- **Rounds**: Two rounds (simplified processing)
+
+### Honest Majority Share Shuffle (HMSS)
+
+Alternative protocol with different security assumptions:
+
+- **Use Case**: Alternative security model
+- **Assumption**: Requires honest majority of Duchies
+- **Performance**: Different performance characteristics than LLv2
+
+<Note>
+  Protocol configuration is specified in the Kingdom and Duchy secret configurations. See the deployment guides for details on protocol setup.
+</Note>
+
+## Storage Architecture
+
+### Kingdom Storage
+
+The Kingdom uses **Google Cloud Spanner** for its primary datastore:
+
+- Stores measurement configurations and requisitions
+- Tracks computation state and assignments
+- Manages resource metadata (data providers, measurement consumers, etc.)
+- Provides global consistency and high availability
+
+### Duchy Storage
+
+Duchies use a combination of storage systems:
+
+- **Google Cloud Spanner**: Computation state and metadata
+- **Google Cloud Storage (GCS)** or **AWS S3**: Encrypted sketch blobs
+- **Postgres** (optional): For certain deployment configurations
+
+<Info>
+  Storage is isolated per Duchy. No Duchy can access another Duchy's storage, ensuring data cannot be combined to compromise privacy.
+</Info>
+
+## Network Architecture and Security
+
+### API Layers
+
+The system exposes multiple API layers with different security and access controls:
+
+<CardGroup cols={2}>
+  <Card title="Public APIs" icon="globe">
+    External load balancer endpoints for measurement consumers and data providers. Require mTLS authentication.
+  </Card>
+  <Card title="System APIs" icon="network-wired">
+    Inter-system communication between Kingdom and Duchies. Require mTLS with certificate validation.
+  </Card>
+  <Card title="Internal APIs" icon="lock">
+    Cluster-internal services (ClusterIP). Not exposed outside Kubernetes cluster.
+  </Card>
+  <Card title="gRPC Protocol" icon="code">
+    All services communicate via gRPC with TLS encryption and authentication.
+  </Card>
+</CardGroup>
+
+### Certificate-Based Authentication
+
+All components use mutual TLS (mTLS) for authentication:
+
+1. Each entity (Kingdom, Duchy, Data Provider, Measurement Consumer) has its own certificate authority
+2. Certificates include both TLS certificates and consent signaling certificates
+3. Authority Key Identifiers (AKID) map certificates to resource identities
+4. All root certificates are distributed to form trusted certificate stores
+
+See [Creating Resources](/operations/creating-resources) for details on certificate management.
+
+### Network Policies
+
+Kubernetes network policies provide defense-in-depth:
+
+- Default deny-all ingress and egress
+- Explicit policies for each service component
+- Isolation between different deployment namespaces
+
+## Deployment Topology
+
+### Kingdom Deployment
+
+Typical Kingdom deployment on GKE:
+
+```
+Kubernetes Cluster (kingdom)
+├── Namespace: default
+│   ├── gcp-kingdom-data-server (ClusterIP)
+│   ├── system-api-server (LoadBalancer)
+│   ├── v2alpha-public-api-server (LoadBalancer)
+│   └── CronJobs (cleanup tasks)
+├── Cloud Spanner: kingdom database
+└── External IPs with DNS names
+```
+
+See [Kingdom Deployment](/deployment/kingdom-gke) for detailed setup.
+
+### Duchy Deployment
+
+Typical Duchy deployment on GKE:
+
+```
+Kubernetes Cluster (worker1-duchy)
+├── Namespace: default
+│   ├── worker1-spanner-computations-server (ClusterIP)
+│   ├── worker1-computation-control-server (LoadBalancer)
+│   ├── worker1-requisition-fulfillment-server (LoadBalancer)
+│   ├── worker1-herald-daemon
+│   ├── worker1-mill-job-scheduler
+│   └── PodTemplates: worker1-llv2-mill, worker1-hmss-mill
+├── Cloud Spanner: duchy database
+├── Cloud Storage: encrypted sketches
+└── External IPs with DNS names
+```
+
+See [Duchy Deployment](/deployment/duchy-gke) for detailed setup.
+
+## Differential Privacy Integration
+
+Differential privacy is integrated at multiple layers:
+
+1. **Noise Injection**: Each Duchy adds calibrated noise to encrypted sketches before sending to Primary Duchy
+2. **Noise Configuration**: Protocol configurations specify noise parameters
+3. **Privacy Budget Management**: Optional privacy budget manager tracks cumulative privacy loss
+4. **Aggregation**: Noise is aggregated during the secure computation
+
+The noise is carefully calibrated to provide formal privacy guarantees (epsilon-delta differential privacy) while maintaining measurement accuracy.
+
+<Tip>
+  For detailed information on the differential privacy implementation, see the research papers linked in the [Introduction](/introduction).
+</Tip>
+
+## Scalability Considerations
+
+- **Horizontal Scaling**: Services can be scaled by increasing replica counts
+- **Cloud Spanner**: Automatically scales for database workload
+- **Mill Jobs**: Computation mills run as Kubernetes Jobs, scheduled dynamically
+- **Storage**: Cloud Storage scales automatically with data volume
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="System Components" icon="cubes" href="/system-components">
+    Detailed breakdown of all Kingdom and Duchy services
+  </Card>
+  <Card title="Kingdom Deployment" icon="crown" href="/deployment/kingdom-gke">
+    Step-by-step Kingdom deployment guide
+  </Card>
+  <Card title="Duchy Deployment" icon="shield" href="/deployment/duchy-gke">
+    Complete Duchy deployment instructions
+  </Card>
+  <Card title="Operations" icon="wrench" href="/operations/creating-resources">
+    Operational guides for managing the system
+  </Card>
+</CardGroup>

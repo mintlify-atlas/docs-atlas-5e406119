@@ -1,0 +1,159 @@
+---
+title: "Deployment Prerequisites"
+description: "Required tools, SDKs, and setup for deploying the Halo Cross-Media Measurement System"
+---
+
+## Overview
+
+Before deploying Kingdom or Duchy components to GKE or EKS, ensure your development environment meets the requirements below.
+
+## Required Tools
+
+<Steps>
+  <Step title="Install Bazel">
+    Install Bazel using [Bazelisk](https://docs.bazel.build/versions/4.2.2/install-bazelisk.html). Ensure the `bazel` command in your path points to the Bazelisk executable.
+
+    Read through the [Building documentation](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/docs/building.md) to verify your build environment meets all requirements.
+
+    <Note>
+    You may need to adjust Bazel commands depending on your machine configuration. Consider using Hybrid Development mode for containerized builds.
+    </Note>
+  </Step>
+
+  <Step title="Install Kubernetes CLI">
+    Install [kubectl](https://kubernetes.io/docs/tasks/tools/) for managing Kubernetes clusters.
+
+    ```bash
+    # Verify installation
+    kubectl version --client
+    ```
+  </Step>
+
+  <Step title="Install Cloud SDKs">
+    Install the appropriate cloud SDK for your deployment target:
+
+    <CodeGroup>
+    ```bash Google Cloud
+    # Install Google Cloud SDK
+    # https://cloud.google.com/sdk/docs/install
+    gcloud version
+    ```
+
+    ```bash AWS
+    # Install AWS CLI
+    # https://aws.amazon.com/cli/
+    aws --version
+    ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Install Terraform">
+    Install [Terraform](https://developer.hashicorp.com/terraform/downloads) for infrastructure provisioning.
+
+    ```bash
+    terraform version
+    ```
+  </Step>
+</Steps>
+
+## Cloud SDK Configuration
+
+### Google Cloud Setup
+
+Configure the Google Cloud CLI with your project and credentials:
+
+```bash
+# Authenticate
+gcloud auth login
+
+# Set project
+gcloud config set project YOUR_PROJECT_ID
+
+# Set default region/zone
+gcloud config set compute/region us-central1
+gcloud config set compute/zone us-central1-a
+
+# Configure gcloud credential helper for container registry
+gcloud auth configure-docker
+```
+
+See [Before you begin](https://cloud.google.com/kubernetes-engine/docs/how-to/creating-a-regional-cluster#before_you_begin) for detailed configuration.
+
+### AWS Setup
+
+Configure the AWS CLI with your credentials:
+
+```bash
+# Configure credentials
+aws configure
+
+# Set default region
+aws configure set region us-west-2
+
+# Verify configuration
+aws sts get-caller-identity
+```
+
+## Download Source Code
+
+Download the latest release from GitHub:
+
+```bash
+# Download from releases page
+wget https://github.com/world-federation-of-advertisers/cross-media-measurement/releases/latest
+
+# Or clone the repository
+git clone https://github.com/world-federation-of-advertisers/cross-media-measurement.git
+cd cross-media-measurement
+```
+
+## Verify Setup (Optional)
+
+Run the automated test suite to verify your environment is configured correctly:
+
+```bash
+bazel test //src/test/...
+```
+
+<Note>
+These tests are run as part of the release process. Any failures are most likely related to your machine setup rather than the code itself.
+</Note>
+
+## Required Permissions
+
+### GKE Deployment
+
+Ensure you have the following Google Cloud IAM roles:
+
+- Kubernetes Engine Admin
+- Spanner Admin
+- Storage Admin
+- Cloud KMS Admin
+- Service Account Admin
+
+### EKS Deployment
+
+Ensure you have the following AWS IAM permissions:
+
+- EKS Cluster management
+- VPC and networking management
+- RDS database management
+- S3 bucket management
+- IAM role management
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Deploy Kingdom on GKE" icon="google" href="/deployment/kingdom-gke">
+    Deploy Kingdom components to Google Kubernetes Engine
+  </Card>
+  <Card title="Deploy Duchy on GKE" icon="google" href="/deployment/duchy-gke">
+    Deploy Duchy components to Google Kubernetes Engine
+  </Card>
+  <Card title="Deploy Kingdom on EKS" icon="aws" href="/deployment/kingdom-eks">
+    Deploy Kingdom components to Amazon EKS
+  </Card>
+  <Card title="Deploy Duchy on EKS" icon="aws" href="/deployment/duchy-eks">
+    Deploy Duchy components to Amazon EKS
+  </Card>
+</CardGroup>

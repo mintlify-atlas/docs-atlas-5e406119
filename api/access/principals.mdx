@@ -1,0 +1,607 @@
+---
+title: Principals Service
+description: Manage principals (users and services) for authentication and authorization
+---
+
+The Principals Service (`wfa.measurement.access.v1alpha.Principals`) manages principal resources representing authenticated entities (users and TLS clients) in the system.
+
+## Overview
+
+Principals are the foundation of authentication and authorization:
+
+- **Authenticated entities** - Each principal represents an authenticated user or service
+- **Identity mapping** - Principals map external identities (OAuth, TLS) to internal IDs
+- **Authorization target** - Principals are granted permissions through policy bindings
+- **Audit trail** - Track which principal performed each action
+
+## Principal Resource
+
+A **Principal** represents an authenticated entity that can access the system.
+
+<ParamField path="name" type="string">
+  Resource name (identifier)
+  
+  **Format:** `principals/{principal}`
+</ParamField>
+
+<ParamField path="identity" type="oneof" required>
+  The external identity associated with this principal
+  
+  **One of:**
+  - `user` - OAuth user identity (issuer + subject)
+  - `tls_client` - TLS client identity (certificate AKID)
+</ParamField>
+
+### OAuth User Identity
+
+<ParamField path="user.issuer" type="string" required>
+  OAuth issuer identifier
+  
+  **Example:** `"https://accounts.google.com"`
+  
+  Immutable after creation.
+</ParamField>
+
+<ParamField path="user.subject" type="string" required>
+  OAuth subject identifier (unique within issuer)
+  
+  **Example:** `"110169484474386276334"`
+  
+  Immutable after creation.
+</ParamField>
+
+**Example:**
+```json
+{
+  "name": "principals/alice",
+  "user": {
+    "issuer": "https://accounts.google.com",
+    "subject": "110169484474386276334"
+  }
+}
+```
+
+### TLS Client Identity
+
+<ParamField path="tls_client.authority_key_identifier" type="bytes" required>
+  Authority Key Identifier (AKID) from X.509 certificate
+  
+  Uniquely identifies the certificate authority.
+  
+  Immutable after creation.
+</ParamField>
+
+**Example:**
+```json
+{
+  "name": "principals/service-account-1",
+  "tls_client": {
+    "authority_key_identifier": "<binary-akid-bytes>"
+  }
+}
+```
+
+## Service Methods
+
+### GetPrincipal
+
+Retrieve a principal by resource name.
+
+<ParamField path="name" type="string" required>
+  Principal resource name
+  
+  **Format:** `principals/{principal}`
+</ParamField>
+
+<ResponseField name="Principal" type="message">
+  The requested principal resource
+</ResponseField>
+
+**Example:**
+```python
+from wfa.measurement.access.v1alpha import principals_service_pb2
+
+request = principals_service_pb2.GetPrincipalRequest(
+    name="principals/alice"
+)
+
+principal = principals_client.GetPrincipal(request)
+print(f"Principal: {principal.name}")
+if principal.HasField('user'):
+    print(f"OAuth User: {principal.user.issuer} / {principal.user.subject}")
+else:
+    print(f"TLS Client: {principal.tls_client.authority_key_identifier.hex()}")
+```
+
+**Error Codes:**
+- `PRINCIPAL_NOT_FOUND` - Principal does not exist
+
+### CreatePrincipal
+
+Create a new principal.
+
+<ParamField path="principal" type="Principal" required>
+  Principal to create
+  
+  Must specify identity (user or tls_client).
+</ParamField>
+
+<ParamField path="principal_id" type="string" required>
+  Resource ID for the principal
+  
+  Must conform to RFC-1034 (case-sensitive).
+</ParamField>
+
+<ResponseField name="Principal" type="message">
+  The created principal resource
+</ResponseField>
+
+**Example - OAuth User:**
+```python
+request = principals_service_pb2.CreatePrincipalRequest(
+    principal_id="alice",
+    principal=principals_service_pb2.Principal(
+        user=principals_service_pb2.Principal.OAuthUser(
+            issuer="https://accounts.google.com",
+            subject="110169484474386276334"
+        )
+    )
+)
+
+principal = principals_client.CreatePrincipal(request)
+print(f"Created principal: {principal.name}")
+```
+
+**Example - TLS Client:**
+```python
+import hashlib
+
+# Extract AKID from certificate
+cert_akid = extract_akid_from_certificate(cert)
+
+request = principals_service_pb2.CreatePrincipalRequest(
+    principal_id="service-account-1",
+    principal=principals_service_pb2.Principal(
+        tls_client=principals_service_pb2.Principal.TlsClient(
+            authority_key_identifier=cert_akid
+        )
+    )
+)
+
+principal = principals_client.CreatePrincipal(request)
+print(f"Created service principal: {principal.name}")
+```
+
+**Error Codes:**
+- `PRINCIPAL_ALREADY_EXISTS` - Principal ID already in use
+
+### DeletePrincipal
+
+Delete a principal and remove from all policy bindings.
+
+<ParamField path="name" type="string" required>
+  Principal resource name
+  
+  **Format:** `principals/{principal}`
+</ParamField>
+
+<ResponseField name="Empty" type="message">
+  Empty response on successful deletion
+</ResponseField>
+
+<Warning>
+Deleting a principal automatically removes it from all policy bindings. This immediately revokes all access for this principal.
+</Warning>
+
+**Example:**
+```python
+from google.protobuf import empty_pb2
+
+request = principals_service_pb2.DeletePrincipalRequest(
+    name="principals/alice"
+)
+
+principals_client.DeletePrincipal(request)
+print("Principal deleted and removed from all policies")
+```
+
+**Error Codes:**
+- `PRINCIPAL_NOT_FOUND` - Principal does not exist
+- `PRINCIPAL_TYPE_NOT_SUPPORTED` - Invalid principal type
+
+### LookupPrincipal
+
+Find a principal by external identity (reverse lookup).
+
+<ParamField path="lookup_key" type="oneof" required>
+  External identity to look up
+  
+  **One of:**
+  - `user` - OAuth user identity
+  - `tls_client` - TLS client identity
+</ParamField>
+
+<ResponseField name="Principal" type="message">
+  The principal with matching identity
+</ResponseField>
+
+**Example - Lookup by OAuth User:**
+```python
+request = principals_service_pb2.LookupPrincipalRequest(
+    user=principals_service_pb2.Principal.OAuthUser(
+        issuer="https://accounts.google.com",
+        subject="110169484474386276334"
+    )
+)
+
+principal = principals_client.LookupPrincipal(request)
+print(f"Found principal: {principal.name}")
+```
+
+**Example - Lookup by TLS Client:**
+```python
+request = principals_service_pb2.LookupPrincipalRequest(
+    tls_client=principals_service_pb2.Principal.TlsClient(
+        authority_key_identifier=cert_akid
+    )
+)
+
+principal = principals_client.LookupPrincipal(request)
+print(f"Found principal: {principal.name}")
+```
+
+**Error Codes:**
+- `PRINCIPAL_NOT_FOUND_FOR_USER` - No principal for this OAuth user
+- `PRINCIPAL_NOT_FOUND_FOR_TLS_CLIENT` - No principal for this TLS client
+
+## Common Workflows
+
+### OAuth Authentication Flow
+
+```python
+def authenticate_oauth_user(id_token):
+    """
+    Authenticate user from OAuth ID token.
+    
+    Args:
+        id_token: JWT ID token from OAuth provider
+    
+    Returns:
+        Principal resource
+    """
+    import jwt
+    
+    # Verify and decode ID token
+    decoded = jwt.decode(
+        id_token,
+        verify=True,
+        audience="your-client-id"
+    )
+    
+    issuer = decoded['iss']
+    subject = decoded['sub']
+    
+    # Lookup existing principal
+    try:
+        principal = principals_client.LookupPrincipal(
+            principals_service_pb2.LookupPrincipalRequest(
+                user=principals_service_pb2.Principal.OAuthUser(
+                    issuer=issuer,
+                    subject=subject
+                )
+            )
+        )
+        print(f"Authenticated as: {principal.name}")
+        return principal
+        
+    except grpc.RpcError as e:
+        if "PRINCIPAL_NOT_FOUND_FOR_USER" in e.details():
+            # Auto-register new user
+            print("First-time user, creating principal")
+            return create_new_user_principal(issuer, subject, decoded.get('email'))
+        raise
+
+def create_new_user_principal(issuer, subject, email=None):
+    """
+    Create principal for new user.
+    """
+    # Generate principal ID from email or subject
+    principal_id = email.split('@')[0] if email else f"user-{subject[:8]}"
+    
+    principal = principals_client.CreatePrincipal(
+        principals_service_pb2.CreatePrincipalRequest(
+            principal_id=principal_id,
+            principal=principals_service_pb2.Principal(
+                user=principals_service_pb2.Principal.OAuthUser(
+                    issuer=issuer,
+                    subject=subject
+                )
+            )
+        )
+    )
+    
+    # Grant default permissions
+    grant_default_permissions(principal.name)
+    
+    return principal
+```
+
+### mTLS Authentication Flow
+
+```python
+def authenticate_tls_client(client_certificate):
+    """
+    Authenticate service from TLS client certificate.
+    
+    Args:
+        client_certificate: X.509 certificate from TLS handshake
+    
+    Returns:
+        Principal resource
+    """
+    from cryptography import x509
+    from cryptography.x509.oid import ExtensionOID
+    
+    # Load certificate
+    cert = x509.load_pem_x509_certificate(client_certificate)
+    
+    # Extract Authority Key Identifier
+    try:
+        aki_ext = cert.extensions.get_extension_for_oid(
+            ExtensionOID.AUTHORITY_KEY_IDENTIFIER
+        )
+        akid = aki_ext.value.key_identifier
+    except x509.ExtensionNotFound:
+        raise ValueError("Certificate missing Authority Key Identifier")
+    
+    # Lookup principal
+    try:
+        principal = principals_client.LookupPrincipal(
+            principals_service_pb2.LookupPrincipalRequest(
+                tls_client=principals_service_pb2.Principal.TlsClient(
+                    authority_key_identifier=akid
+                )
+            )
+        )
+        print(f"Authenticated service: {principal.name}")
+        return principal
+        
+    except grpc.RpcError as e:
+        if "PRINCIPAL_NOT_FOUND_FOR_TLS_CLIENT" in e.details():
+            raise PermissionError("TLS client certificate not authorized")
+        raise
+```
+
+### User Provisioning
+
+```python
+def provision_new_user(email, oauth_issuer, oauth_subject, roles):
+    """
+    Provision a new user with roles.
+    
+    Args:
+        email: User email address
+        oauth_issuer: OAuth issuer URL
+        oauth_subject: OAuth subject ID
+        roles: List of role names to grant
+    """
+    # Create principal
+    principal_id = email.split('@')[0]
+    
+    principal = principals_client.CreatePrincipal(
+        principals_service_pb2.CreatePrincipalRequest(
+            principal_id=principal_id,
+            principal=principals_service_pb2.Principal(
+                user=principals_service_pb2.Principal.OAuthUser(
+                    issuer=oauth_issuer,
+                    subject=oauth_subject
+                )
+            )
+        )
+    )
+    
+    print(f"Created principal: {principal.name}")
+    
+    # Grant roles via policy
+    for role in roles:
+        add_principal_to_role(
+            resource="measurementConsumers/default",
+            principal_name=principal.name,
+            role_name=role
+        )
+        print(f"Granted role: {role}")
+    
+    return principal
+
+# Usage
+provision_new_user(
+    email="alice@example.com",
+    oauth_issuer="https://accounts.google.com",
+    oauth_subject="110169484474386276334",
+    roles=["report-viewer", "metric-creator"]
+)
+```
+
+### Service Account Creation
+
+```python
+def create_service_account(service_name, certificate_path, roles):
+    """
+    Create a service account principal from certificate.
+    
+    Args:
+        service_name: Name for the service
+        certificate_path: Path to X.509 certificate file
+        roles: List of role names to grant
+    """
+    from cryptography import x509
+    from cryptography.x509.oid import ExtensionOID
+    
+    # Read certificate
+    with open(certificate_path, 'rb') as f:
+        cert = x509.load_pem_x509_certificate(f.read())
+    
+    # Extract AKID
+    aki_ext = cert.extensions.get_extension_for_oid(
+        ExtensionOID.AUTHORITY_KEY_IDENTIFIER
+    )
+    akid = aki_ext.value.key_identifier
+    
+    # Create principal
+    principal_id = f"service-{service_name}"
+    
+    principal = principals_client.CreatePrincipal(
+        principals_service_pb2.CreatePrincipalRequest(
+            principal_id=principal_id,
+            principal=principals_service_pb2.Principal(
+                tls_client=principals_service_pb2.Principal.TlsClient(
+                    authority_key_identifier=akid
+                )
+            )
+        )
+    )
+    
+    print(f"Created service account: {principal.name}")
+    print(f"AKID: {akid.hex()}")
+    
+    # Grant roles
+    for role in roles:
+        add_principal_to_role(
+            resource="measurementConsumers/default",
+            principal_name=principal.name,
+            role_name=role
+        )
+    
+    return principal
+
+# Usage
+create_service_account(
+    service_name="data-ingestion",
+    certificate_path="/path/to/service.crt",
+    roles=["data-provider", "requisition-fulfiller"]
+)
+```
+
+### User Deprovisioning
+
+```python
+def deprovision_user(principal_name):
+    """
+    Remove user and revoke all access.
+    
+    Args:
+        principal_name: Principal resource name
+    """
+    # Get principal info for audit log
+    principal = principals_client.GetPrincipal(
+        principals_service_pb2.GetPrincipalRequest(
+            name=principal_name
+        )
+    )
+    
+    print(f"Deprovisioning: {principal.name}")
+    if principal.HasField('user'):
+        print(f"  OAuth User: {principal.user.issuer} / {principal.user.subject}")
+    
+    # Delete principal (automatically removes from all policies)
+    principals_client.DeletePrincipal(
+        principals_service_pb2.DeletePrincipalRequest(
+            name=principal_name
+        )
+    )
+    
+    print(f"Deleted principal and revoked all access")
+    
+    # Audit log
+    audit_log.info(f"Deprovisioned user: {principal_name}")
+
+# Usage
+deprovision_user("principals/alice")
+```
+
+## Identity Uniqueness
+
+Each external identity can map to only one principal:
+
+- **OAuth users:** `(issuer, subject)` pair must be unique
+- **TLS clients:** `authority_key_identifier` must be unique
+
+<Note>
+If you attempt to create a principal with an identity that already exists (even with a different principal ID), the creation will fail.
+</Note>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use consistent principal IDs">
+    Choose principal IDs that are meaningful and consistent (e.g., email username, service name). This makes audit logs and policies easier to understand.
+  </Accordion>
+  
+  <Accordion title="Auto-register new users">
+    Implement automatic principal creation for first-time OAuth users to provide seamless onboarding.
+  </Accordion>
+  
+  <Accordion title="Validate certificates for TLS clients">
+    Before creating TLS client principals, verify certificates are signed by trusted CAs and haven't expired.
+  </Accordion>
+  
+  <Accordion title="Audit principal lifecycle">
+    Log all principal creation and deletion events with timestamps and operator IDs for security auditing.
+  </Accordion>
+  
+  <Accordion title="Use LookupPrincipal for authentication">
+    In authentication flows, use LookupPrincipal to find the principal by external identity rather than assuming principal IDs.
+  </Accordion>
+  
+  <Accordion title="Handle deletion carefully">
+    Remember that deleting a principal removes it from ALL policies. Consider deactivation mechanisms if you need to preserve audit history.
+  </Accordion>
+</AccordionGroup>
+
+## Error Handling
+
+<ResponseField name="PRINCIPAL_NOT_FOUND" type="error">
+  Principal does not exist
+  
+  **Resolution:** Create principal first or verify principal name
+</ResponseField>
+
+<ResponseField name="PRINCIPAL_NOT_FOUND_FOR_USER" type="error">
+  No principal exists for the specified OAuth user
+  
+  **Resolution:** Create principal for this user
+</ResponseField>
+
+<ResponseField name="PRINCIPAL_NOT_FOUND_FOR_TLS_CLIENT" type="error">
+  No principal exists for the specified TLS client
+  
+  **Resolution:** Register the certificate by creating a principal
+</ResponseField>
+
+<ResponseField name="PRINCIPAL_ALREADY_EXISTS" type="error">
+  Principal ID already in use or identity already mapped
+  
+  **Resolution:** Choose different principal ID or use existing principal
+</ResponseField>
+
+<ResponseField name="PRINCIPAL_TYPE_NOT_SUPPORTED" type="error">
+  Invalid principal type or identity configuration
+  
+  **Resolution:** Verify principal has valid user or tls_client identity
+</ResponseField>
+
+## Related APIs
+
+<CardGroup cols={3}>
+  <Card title="Policies Service" icon="shield" href="/api/access/policies">
+    Bind principals to roles via policies
+  </Card>
+  
+  <Card title="Permissions Service" icon="key" href="/api/access/permissions">
+    Check principal permissions
+  </Card>
+  
+  <Card title="API Overview" icon="book" href="/api/overview">
+    Authentication and authorization overview
+  </Card>
+</CardGroup>

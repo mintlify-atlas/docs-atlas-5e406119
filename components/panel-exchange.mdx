@@ -1,0 +1,635 @@
+---
+title: Panel Exchange
+description: Panel match and exchange functionality for cross-panel measurements
+---
+
+The **Panel Exchange** system enables secure, privacy-preserving matching and exchange of panel data between organizations. It allows multiple parties to identify overlapping users across their panels without revealing individual identities, enabling calibrated cross-media measurements.
+
+## Purpose
+
+Panel Exchange provides:
+
+- **Secure Panel Matching**: Identify overlap between panels without exposing user identities
+- **Privacy-Preserving Exchange**: Exchange match data using cryptographic protocols
+- **Workflow Orchestration**: Coordinate multi-step exchange processes between parties
+- **Calibration Support**: Enable panel-based calibration of measurement results
+
+<Note>
+**Panel Data**: A panel is a set of users whose behavior is tracked over time. Panel exchanges allow comparing panels from different organizations (e.g., a publisher panel and a measurement panel) to understand overlap and differences.
+</Note>
+
+## Architecture
+
+Panel Exchange is a distributed system where each participating organization runs an **Exchange Workflow Daemon**:
+
+```
+┌──────────────────────────────────────────────────┐
+│                   Kingdom                            │
+│        (Exchange Coordination & State)              │
+└─────────────────────┬───────────────────┬─────────────┘
+                     │                   │
+                     ▼                   ▼
+    ┌────────────────────────────┐  ┌────────────────────────────┐
+    │  Exchange Workflow       │  │  Exchange Workflow       │
+    │  Daemon (Party A)        │  │  Daemon (Party B)        │
+    │                          │  │                          │
+    │  - Claim exchange steps  │  │  - Claim exchange steps  │
+    │  - Execute tasks         │  │  - Execute tasks         │
+    │  - Update Kingdom state  │  │  - Update Kingdom state  │
+    └──────────┬─────────────────┘  └──────────┬─────────────────┘
+               │                            │
+               ▼                            ▼
+    ┌────────────────────────────┐  ┌────────────────────────────┐
+    │  Private Storage         │  │  Private Storage         │
+    │  (Party A's panel data)  │  │  (Party B's panel data)  │
+    └────────────────────────────┘  └────────────────────────────┘
+               │                            │
+               │          Shared             │
+               └───────────┬────────────┘
+                            │
+                            ▼
+                 ┌──────────────────────┐
+                 │  Shared Storage      │
+                 │  (Exchange results)  │
+                 └──────────────────────┘
+```
+
+## Core Components
+
+### Exchange Workflow Daemon
+
+**File**: `src/main/kotlin/org/wfanet/panelmatch/client/deploy/ExchangeWorkflowDaemon.kt`
+
+#### Purpose
+
+The Exchange Workflow Daemon is the main component each party runs to:
+
+- Poll Kingdom for exchange work
+- Claim exchange steps assigned to this party
+- Execute exchange tasks (encryption, matching, etc.)
+- Store intermediate results
+- Update exchange state in Kingdom
+
+#### Key Properties
+
+<Accordion title="Identity">
+  **Type**: `Identity`
+  
+  Identifies the party running this daemon:
+  - Organization name
+  - Resource identifiers
+  - Authentication credentials
+</Accordion>
+
+<Accordion title="API Client">
+  **Type**: `ApiClient`
+  
+  Client for Kingdom API:
+  - Query available exchanges
+  - Claim exchange steps
+  - Update step status
+  - Report results
+</Accordion>
+
+<Accordion title="Root Certificates">
+  **Type**: `SecretMap`
+  
+  Maps partner resource names to root certificates:
+  - Validates partner identity
+  - Verifies data authenticity
+  - Enables secure communication
+</Accordion>
+
+<Accordion title="Exchange Workflows">
+  **Type**: `SecretMap`
+  
+  Maps recurring exchange IDs to serialized ExchangeWorkflow definitions:
+  - Defines exchange steps
+  - Specifies task dependencies
+  - Configures parameters
+</Accordion>
+
+<Accordion title="Exchange Task Mapper">
+  **Type**: `ExchangeTaskMapper`
+  
+  Maps exchange steps to executable tasks:
+  - Determines which task to run for a step
+  - Configures task parameters
+  - Handles task execution
+</Accordion>
+
+#### Storage Configuration
+
+**Private Storage**:
+- Each party's own panel data
+- Encrypted at rest
+- Only accessible by that party
+- Platform-specific (GCS, S3, BigQuery, etc.)
+
+**Shared Storage**:
+- Exchange intermediate results
+- Encrypted data shared between parties
+- Both parties can read/write
+- Coordinated through workflow
+
+### Exchange Workflow
+
+**Protos**: `src/main/proto/wfa/panelmatch/client/internal/exchange_workflow.proto`
+
+Defines the structure of an exchange:
+
+<Accordion title="Steps">
+  An ordered list of exchange steps:
+  - Each step has a unique identifier
+  - Steps may depend on previous steps
+  - Steps are assigned to specific parties
+  - Contains task configuration
+</Accordion>
+
+<Accordion title="Dependency Graph">
+  **File**: `client/common/ExchangeWorkflowDependencyGraph.kt`
+  
+  Represents dependencies between steps:
+  - Ensures steps execute in correct order
+  - Enables parallel execution when possible
+  - Validates workflow consistency
+</Accordion>
+
+### Exchange Steps
+
+**Protos**: `src/main/proto/wfa/panelmatch/client/exchangetasks/exchangesteps.proto`
+
+Types of exchange steps:
+
+<Accordion title="Data Preparation">
+  Prepare panel data for exchange:
+  - Read raw panel data
+  - Apply preprocessing
+  - Encrypt identifiers
+  - Store in private storage
+</Accordion>
+
+<Accordion title="Encryption Steps">
+  Apply cryptographic operations:
+  - Commutative encryption for matching
+  - Bloom filter construction
+  - Hash-based identifiers
+  - Key exchange
+</Accordion>
+
+<Accordion title="Matching Steps">
+  Identify overlapping users:
+  - Compare encrypted identifiers
+  - Compute set intersection
+  - Generate match statistics
+  - Create match results
+</Accordion>
+
+<Accordion title="Result Generation">
+  Produce final exchange outputs:
+  - Decrypt match results (if appropriate)
+  - Compute overlap statistics
+  - Generate calibration data
+  - Store results in shared storage
+</Accordion>
+
+### Exchange Step Attempts
+
+**Protos**: `src/main/proto/wfa/panelmatch/client/internal/exchange_step_attempt.proto`
+
+Tracks execution attempts for steps:
+
+- **Attempt Number**: Increments on retry
+- **State**: READY, IN_PROGRESS, SUCCEEDED, FAILED
+- **Start/End Time**: Execution timing
+- **Error Details**: Failure information for debugging
+
+**File**: `client/common/ExchangeStepAttemptKey.kt`
+
+### Exchange Tasks
+
+Implementation of step execution:
+
+**Base Components**:
+- `ExchangeTaskMapper`: Maps steps to tasks
+- `ExchangeTaskExecutor`: Executes tasks
+- `ExchangeStepExecutor`: Orchestrates step execution
+- `ExchangeStepValidator`: Validates step completion
+
+**File**: `client/launcher/ExchangeStepValidatorImpl.kt`
+
+## Exchange Workflow Execution
+
+### Workflow Lifecycle
+
+<Steps>
+  <Step title="Exchange Creation">
+    Kingdom creates a recurring exchange:
+    - Defines participating parties
+    - Specifies exchange workflow
+    - Sets schedule (dates to execute)
+  </Step>
+  
+  <Step title="Step Polling">
+    Each party's daemon polls for claimable steps:
+    - Queries Kingdom for ready steps
+    - Checks step dependencies satisfied
+    - Verifies step assigned to this party
+  </Step>
+  
+  <Step title="Step Claiming">
+    Daemon claims a step:
+    - Creates exchange step attempt
+    - Sets state to IN_PROGRESS
+    - Acquires exclusive lock on step
+  </Step>
+  
+  <Step title="Task Execution">
+    Daemon executes the task:
+    - Reads input data (private or shared storage)
+    - Performs computation (encryption, matching, etc.)
+    - Writes output data (private or shared storage)
+    - Handles errors and retries
+  </Step>
+  
+  <Step title="State Update">
+    Daemon updates step status:
+    - Reports SUCCESS or FAILURE to Kingdom
+    - Records execution metrics
+    - Releases lock on step
+  </Step>
+  
+  <Step title="Workflow Progression">
+    Kingdom advances workflow:
+    - Marks step as complete
+    - Enables dependent steps
+    - Detects workflow completion
+  </Step>
+</Steps>
+
+### Task Timeout
+
+**Property**: `taskTimeout: Timeout`
+
+Each task has a timeout:
+- Prevents stuck tasks from blocking workflow
+- Task cancelled if exceeds timeout
+- Step marked as FAILED
+- Can be retried with new attempt
+
+### Throttling
+
+**Property**: `throttler: Throttler`
+
+Controls polling rate:
+- Limits how often daemon queries Kingdom
+- Prevents overwhelming Kingdom API
+- Backoff when no work available
+
+## Storage Architecture
+
+### Storage Platforms
+
+**Supported Platforms** (from `StorageDetails.proto`):
+
+<CardGroup cols={2}>
+  <Card title="Google Cloud" icon="google">
+    - Cloud Storage (GCS)
+    - BigQuery
+  </Card>
+  <Card title="Amazon Web Services" icon="aws">
+    - S3
+    - (Others via extensions)
+  </Card>
+</CardGroup>
+
+### Private Storage
+
+**Property**: `privateStorageFactories`
+
+Maps platform to storage factory:
+```kotlin
+Map<PlatformCase, (StorageDetails, ExchangeDateKey) -> StorageFactory>
+```
+
+Each party configures their private storage:
+- Different parties can use different platforms
+- Storage credentials kept secret
+- No access by other parties or Kingdom
+
+**Property**: `privateStorageInfo: StorageDetailsProvider`
+
+Provides storage details per recurring exchange.
+
+### Shared Storage
+
+**Property**: `sharedStorageFactories`
+
+Maps platform to shared storage factory.
+
+Shared storage is accessible by all parties in the exchange:
+- Stores encrypted intermediate data
+- Coordinates data handoffs between parties
+- Configured with mutual access permissions
+- Still encrypted (parties can't see plaintext)
+
+## Privacy and Security
+
+### Cryptographic Protocols
+
+<Accordion title="Commutative Encryption">
+  Enables secure set intersection:
+  - Each party encrypts their identifiers
+  - Encryption commutes: E_A(E_B(x)) = E_B(E_A(x))
+  - Matching possible without revealing identifiers
+  - No party learns other's raw panel
+</Accordion>
+
+<Accordion title="Join Keys">
+  **Protos**: `client/exchangetasks/join_key.proto`
+  
+  Hashed identifiers for matching:
+  - Deterministic hashing with salt
+  - Truncation for anonymization
+  - Bloom filter membership testing
+</Accordion>
+
+### Certificate Management
+
+**Property**: `certificateManager: CertificateManager`
+
+Manages certificates for:
+- Authenticating parties
+- Verifying data signatures
+- Establishing secure channels
+- Rotating keys
+
+### Data Protection
+
+Multiple layers of protection:
+
+1. **Encryption at Rest**: All storage encrypted
+2. **Encryption in Transit**: TLS for all communication
+3. **Cryptographic Protocols**: Commutative encryption for matching
+4. **Access Control**: Strict permissions on storage
+5. **Audit Logging**: All operations logged
+
+## Event Preprocessing
+
+**Protos**: `client/eventpreprocessing/`
+
+### Combined Events
+
+**File**: `combined_events.proto`
+
+Combines events for efficient processing:
+- Merges events from multiple sources
+- Deduplicates identifiers
+- Normalizes formats
+- Prepares for encryption
+
+### Preprocess Events
+
+**File**: `preprocess_events.proto`
+
+Defines preprocessing operations:
+- Filtering
+- Aggregation  
+- Identifier extraction
+- Timestamp alignment
+
+## Authorized Views
+
+**Component**: `client/authorizedview/`
+
+For BigQuery-based exchanges:
+
+### Encrypted Events
+
+**Proto**: `encrypted_event.proto`
+
+Encrypted event data in BigQuery:
+- Encrypted identifiers
+- Associated metadata
+- Timestamps
+- Event attributes
+
+### BigQuery Streaming
+
+**Proto**: `bigquery_streaming_status.proto`
+
+Tracks BigQuery streaming insert status:
+- Insert success/failure
+- Error details
+- Retry state
+
+**Service Factory**:
+**File**: `BigQueryServiceFactory.kt`
+
+Creates BigQuery clients for exchange tasks.
+
+### AEAD Encryption
+
+**File**: `TinkAeadHelper.kt`
+
+Uses Tink library for authenticated encryption:
+- AEAD (Authenticated Encryption with Associated Data)
+- Protects confidentiality and integrity
+- Prevents tampering
+
+## Exchange Checkpoints
+
+**Proto**: `client/internal/exchange_checkpoint.proto`
+
+Checkpoints enable resumability:
+
+- Save progress during long-running tasks
+- Resume from checkpoint on failure
+- Avoid re-processing completed work
+- Stored in private storage
+
+## Integration with Kingdom
+
+Panel Exchange is coordinated by Kingdom:
+
+### Kingdom API Services
+
+Exchange Workflow Daemons use Kingdom Public API:
+
+**ExchangesService**:
+- List recurring exchanges
+- Get exchange details
+- Query exchange dates
+
+**ExchangeStepsService**:
+- List ready steps
+- Claim steps
+- Update step status
+
+**ExchangeStepAttemptsService**:
+- Create attempts
+- Report attempt results
+- Track retry history
+
+These services are implemented in Kingdom's v2alpha Public API.
+
+### Kingdom State Management
+
+Kingdom tracks:
+- Recurring exchange definitions
+- Exchange instances per date
+- Step execution state
+- Attempt history
+- Workflow completion status
+
+### Cleanup
+
+Kingdom runs exchanges-deletion CronJob to clean up old exchanges (see [Kingdom Daemons](/components/kingdom/daemons)).
+
+## Deployment
+
+Each participating organization deploys:
+
+### Exchange Workflow Daemon
+
+Can run as:
+- **Kubernetes Deployment**: Continuous daemon
+- **Cloud Function**: Triggered by schedule or events
+- **Cron Job**: Periodic execution
+
+**Example**: `client/deploy/example/ExampleDaemon.kt`
+
+### Storage Infrastructure
+
+Provision:
+- Private storage (GCS bucket, S3 bucket, BigQuery dataset)
+- Shared storage (with partner access)
+- Appropriate IAM/access policies
+
+### Configuration
+
+**Flags and Configuration**:
+- `ExchangeWorkflowFlags.kt`: Command-line flags
+- `ExchangeWorkflowDaemonFromFlags.kt`: Daemon construction
+- `DaemonStorageClientDefaults.kt`: Storage defaults
+
+### Production Considerations
+
+<CardGroup cols={2}>
+  <Card title="Secrets Management" icon="key">
+    Store certificates and keys securely (Secret Manager)
+  </Card>
+  <Card title="Monitoring" icon="chart-line">
+    Track exchange progress and failures
+  </Card>
+  <Card title="Retry Logic" icon="rotate">
+    Configure appropriate retry policies
+  </Card>
+  <Card title="Resource Limits" icon="memory">
+    Set limits for large panel processing
+  </Card>
+</CardGroup>
+
+## Use Cases
+
+### Panel Overlap Measurement
+
+Measure overlap between two panels:
+- Publisher panel vs. measurement panel
+- Two advertiser panels
+- Platform panel vs. third-party panel
+
+**Output**: Overlap statistics without exposing identities
+
+### Calibration
+
+Use panel overlap to calibrate measurements:
+- Adjust reach estimates based on panel coverage
+- Correct for panel bias
+- Validate measurement accuracy
+
+### Audience Extension
+
+Identify users in one panel based on another:
+- Extend targeting to matched users
+- Build lookalike audiences
+- Cross-platform user linking (privacy-preserving)
+
+## Testing
+
+The panel match system includes testing utilities:
+
+**Integration Tests**:
+`integration/` directory
+
+**Example Implementations**:
+- `ExampleDaemon.kt`: Reference implementation
+- `ExampleStorageFactories.kt`: Test storage setup
+
+## Best Practices
+
+### Exchange Design
+
+- Define clear workflow dependencies
+- Use appropriate cryptographic protocols
+- Test workflows before production
+- Plan for failures and retries
+
+### Storage Management
+
+- Use separate storage for each exchange date
+- Clean up old exchange data
+- Monitor storage costs
+- Set appropriate retention policies
+
+### Security
+
+- Rotate certificates regularly
+- Use strong encryption keys
+- Audit access to storage
+- Minimize data retention
+- Follow least-privilege principle
+
+### Monitoring
+
+- Alert on failed exchange steps
+- Track workflow completion times
+- Monitor storage usage
+- Log all cryptographic operations
+
+## Troubleshooting
+
+### Exchange Not Progressing
+
+**Check**:
+- Workflow daemon running for all parties?
+- Network connectivity to Kingdom?
+- Step dependencies satisfied?
+- Storage accessible?
+
+### Step Failures
+
+**Investigate**:
+- Exchange step attempt logs
+- Error details in Kingdom
+- Storage permissions
+- Data format issues
+
+### Performance Issues
+
+**Optimize**:
+- Increase parallelism where possible
+- Use appropriate storage tier
+- Optimize data preprocessing
+- Increase timeout for large panels
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Kingdom Services" icon="crown" href="/components/kingdom/services">
+    Learn about Kingdom's exchange coordination APIs
+  </Card>
+  <Card title="Kingdom Overview" icon="building" href="/components/kingdom/overview">
+    Understand the broader measurement system
+  </Card>
+</CardGroup>

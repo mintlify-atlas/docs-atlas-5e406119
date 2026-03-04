@@ -1,0 +1,655 @@
+---
+title: Policies Service
+description: Manage access policies and role bindings for resources
+---
+
+The Policies Service (`wfa.measurement.access.v1alpha.Policies`) manages access control policies that bind principals to roles for protected resources.
+
+## Overview
+
+Policies define **who** (principals) can do **what** (roles with permissions) on **which resources**:
+
+- **Resource-scoped** - Each policy protects a specific resource
+- **Role-based** - Policies bind principals to roles, not individual permissions
+- **Hierarchical** - Policies can apply to resource hierarchies
+- **Versioned** - ETags enable optimistic concurrency control
+
+## Policy Resource
+
+A **Policy** represents the access control configuration for a single resource.
+
+<ParamField path="name" type="string">
+  Resource name (identifier)
+  
+  **Format:** `policies/{policy}`
+</ParamField>
+
+<ParamField path="protected_resource" type="string">
+  Name of the resource this policy protects
+  
+  **Format:** Any resource name (e.g., `measurementConsumers/{id}/reports/{id}`)
+  
+  If not specified, this is the root policy for the entire API.
+  
+  **Must be unique** - Each protected resource can have at most one policy.
+</ParamField>
+
+<ParamField path="bindings" type="Binding[]">
+  List of role bindings
+  
+  Each binding associates a role with a set of principals (members).
+</ParamField>
+
+<ParamField path="etag" type="string">
+  Entity tag for optimistic concurrency control
+  
+  Updated automatically on each modification.
+</ParamField>
+
+## Policy Binding
+
+A **Binding** within a policy associates a role with principals:
+
+<ParamField path="role" type="string" required>
+  Role resource name
+  
+  **Format:** `roles/{role}`
+</ParamField>
+
+<ParamField path="members" type="string[]" required>
+  Principal resource names that have this role
+  
+  **Format:** `principals/{principal}`
+  
+  Unordered list (order not guaranteed).
+</ParamField>
+
+### Example Policy
+
+```json
+{
+  "name": "policies/mc-123-policy",
+  "protected_resource": "measurementConsumers/123",
+  "bindings": [
+    {
+      "role": "roles/measurement-admin",
+      "members": [
+        "principals/user-alice",
+        "principals/user-bob"
+      ]
+    },
+    {
+      "role": "roles/report-viewer",
+      "members": [
+        "principals/user-charlie",
+        "principals/service-account-1"
+      ]
+    }
+  ],
+  "etag": "W/\"abc123\""
+}
+```
+
+## Service Methods
+
+### GetPolicy
+
+Retrieve a policy by resource name.
+
+<ParamField path="name" type="string" required>
+  Policy resource name
+  
+  **Format:** `policies/{policy}`
+</ParamField>
+
+<ResponseField name="Policy" type="message">
+  The requested policy resource
+</ResponseField>
+
+**Example:**
+```python
+from wfa.measurement.access.v1alpha import policies_service_pb2
+
+request = policies_service_pb2.GetPolicyRequest(
+    name="policies/mc-123-policy"
+)
+
+policy = policies_client.GetPolicy(request)
+print(f"Policy for: {policy.protected_resource}")
+for binding in policy.bindings:
+    print(f"  Role: {binding.role}")
+    print(f"  Members: {binding.members}")
+```
+
+**Error Codes:**
+- `POLICY_NOT_FOUND` - Policy does not exist
+
+### CreatePolicy
+
+Create a new policy for a resource.
+
+<ParamField path="policy" type="Policy" required>
+  Policy to create
+  
+  Must specify `protected_resource` and initial `bindings`.
+</ParamField>
+
+<ParamField path="policy_id" type="string" required>
+  Resource ID for the policy
+  
+  Must conform to RFC-1034 (case-sensitive).
+</ParamField>
+
+<ResponseField name="Policy" type="message">
+  The created policy resource
+</ResponseField>
+
+**Example:**
+```python
+request = policies_service_pb2.CreatePolicyRequest(
+    policy_id="mc-123-policy",
+    policy=policies_service_pb2.Policy(
+        protected_resource="measurementConsumers/123",
+        bindings=[
+            policies_service_pb2.Policy.Binding(
+                role="roles/measurement-admin",
+                members=[
+                    "principals/user-alice"
+                ]
+            )
+        ]
+    )
+)
+
+policy = policies_client.CreatePolicy(request)
+print(f"Created policy: {policy.name}")
+print(f"ETag: {policy.etag}")
+```
+
+**Error Codes:**
+- `PRINCIPAL_TYPE_NOT_SUPPORTED` - Invalid principal type
+- `POLICY_ALREADY_EXISTS` - Policy already exists for this resource
+- `ROLE_NOT_FOUND` - Role does not exist
+- `PRINCIPAL_NOT_FOUND` - One or more principals don't exist
+
+### LookupPolicy
+
+Find a policy by the resource it protects.
+
+<ParamField path="protected_resource" type="string">
+  Name of the protected resource
+  
+  **Format:** Any resource name
+  
+  If not specified, returns the root policy.
+</ParamField>
+
+<ResponseField name="Policy" type="message">
+  The policy protecting the specified resource
+</ResponseField>
+
+**Example:**
+```python
+request = policies_service_pb2.LookupPolicyRequest(
+    protected_resource="measurementConsumers/123/reports/456"
+)
+
+policy = policies_client.LookupPolicy(request)
+print(f"Found policy: {policy.name}")
+```
+
+**Error Codes:**
+- `POLICY_NOT_FOUND_FOR_PROTECTED_RESOURCE` - No policy exists for this resource
+
+### AddPolicyBindingMembers
+
+Add principals to a policy binding (grant role to users).
+
+<ParamField path="name" type="string" required>
+  Policy resource name
+  
+  **Format:** `policies/{policy}`
+</ParamField>
+
+<ParamField path="role" type="string" required>
+  Role to add members to
+  
+  **Format:** `roles/{role}`
+  
+  If this role doesn't exist in the policy, a new binding is created.
+</ParamField>
+
+<ParamField path="members" type="string[]" required>
+  Principal resource names to add
+  
+  **Format:** `principals/{principal}`
+  
+  Unordered list. Duplicates are ignored.
+</ParamField>
+
+<ParamField path="etag" type="string">
+  Current etag of the policy
+  
+  If specified and doesn't match, returns `ABORTED` status.
+</ParamField>
+
+<ResponseField name="Policy" type="message">
+  Updated policy with new members added
+</ResponseField>
+
+**Example:**
+```python
+request = policies_service_pb2.AddPolicyBindingMembersRequest(
+    name="policies/mc-123-policy",
+    role="roles/report-viewer",
+    members=[
+        "principals/user-david",
+        "principals/user-eve"
+    ],
+    etag="W/\"abc123\""  # Current etag for concurrency control
+)
+
+policy = policies_client.AddPolicyBindingMembers(request)
+print(f"Added members to {policy.name}")
+print(f"New ETag: {policy.etag}")
+```
+
+**Error Codes:**
+- `POLICY_NOT_FOUND` - Policy does not exist
+- `ETAG_MISMATCH` - ETag doesn't match (concurrent modification)
+- `ROLE_NOT_FOUND` - Role does not exist
+- `PRINCIPAL_NOT_FOUND` - One or more principals don't exist
+- `PRINCIPAL_TYPE_NOT_SUPPORTED` - Invalid principal type
+- `POLICY_BINDING_MEMBERSHIP_ALREADY_EXISTS` - Member already has this role
+
+### RemovePolicyBindingMembers
+
+Remove principals from a policy binding (revoke role from users).
+
+<ParamField path="name" type="string" required>
+  Policy resource name
+  
+  **Format:** `policies/{policy}`
+</ParamField>
+
+<ParamField path="role" type="string" required>
+  Role to remove members from
+  
+  **Format:** `roles/{role}`
+</ParamField>
+
+<ParamField path="members" type="string[]" required>
+  Principal resource names to remove
+  
+  **Format:** `principals/{principal}`
+</ParamField>
+
+<ParamField path="etag" type="string">
+  Current etag of the policy (optional)
+</ParamField>
+
+<ResponseField name="Policy" type="message">
+  Updated policy with members removed
+</ResponseField>
+
+**Example:**
+```python
+request = policies_service_pb2.RemovePolicyBindingMembersRequest(
+    name="policies/mc-123-policy",
+    role="roles/report-viewer",
+    members=[
+        "principals/user-charlie"  # Revoke access
+    ],
+    etag="W/\"xyz789\""
+)
+
+policy = policies_client.RemovePolicyBindingMembers(request)
+print(f"Removed members from {policy.name}")
+```
+
+**Error Codes:**
+- `POLICY_NOT_FOUND` - Policy does not exist
+- `ETAG_MISMATCH` - ETag doesn't match
+- `ROLE_NOT_FOUND` - Role does not exist in policy
+- `PRINCIPAL_NOT_FOUND` - One or more principals don't exist
+- `PRINCIPAL_TYPE_NOT_SUPPORTED` - Invalid principal type
+- `POLICY_BINDING_MEMBERSHIP_NOT_FOUND` - Member doesn't have this role
+
+## Common Workflows
+
+### Creating a Complete Access Policy
+
+```python
+def setup_measurement_consumer_policy(mc_id, admin_users, viewer_users):
+    """
+    Create a complete policy for a measurement consumer.
+    
+    Args:
+        mc_id: Measurement consumer ID
+        admin_users: List of admin principal names
+        viewer_users: List of viewer principal names
+    """
+    # Create policy with admin role
+    policy = policies_client.CreatePolicy(
+        policies_service_pb2.CreatePolicyRequest(
+            policy_id=f"mc-{mc_id}-policy",
+            policy=policies_service_pb2.Policy(
+                protected_resource=f"measurementConsumers/{mc_id}",
+                bindings=[
+                    policies_service_pb2.Policy.Binding(
+                        role="roles/measurement-admin",
+                        members=[f"principals/{user}" for user in admin_users]
+                    ),
+                    policies_service_pb2.Policy.Binding(
+                        role="roles/report-viewer",
+                        members=[f"principals/{user}" for user in viewer_users]
+                    )
+                ]
+            )
+        )
+    )
+    
+    print(f"Created policy for measurementConsumers/{mc_id}")
+    return policy
+
+# Usage
+policy = setup_measurement_consumer_policy(
+    mc_id="123",
+    admin_users=["alice", "bob"],
+    viewer_users=["charlie", "david", "eve"]
+)
+```
+
+### Granting Access to a User
+
+```python
+def grant_user_access(resource_name, user_id, role_name):
+    """
+    Grant a user access to a resource by adding them to a role.
+    
+    Args:
+        resource_name: Protected resource name
+        user_id: User principal ID
+        role_name: Role to grant
+    """
+    # Lookup existing policy
+    policy = policies_client.LookupPolicy(
+        policies_service_pb2.LookupPolicyRequest(
+            protected_resource=resource_name
+        )
+    )
+    
+    # Add user to role
+    updated_policy = policies_client.AddPolicyBindingMembers(
+        policies_service_pb2.AddPolicyBindingMembersRequest(
+            name=policy.name,
+            role=f"roles/{role_name}",
+            members=[f"principals/{user_id}"],
+            etag=policy.etag
+        )
+    )
+    
+    print(f"Granted {role_name} to {user_id} on {resource_name}")
+    return updated_policy
+
+# Usage
+grant_user_access(
+    resource_name="measurementConsumers/123",
+    user_id="frank",
+    role_name="report-viewer"
+)
+```
+
+### Revoking Access from a User
+
+```python
+def revoke_user_access(resource_name, user_id, role_name):
+    """
+    Revoke a user's access to a resource.
+    
+    Args:
+        resource_name: Protected resource name
+        user_id: User principal ID
+        role_name: Role to revoke
+    """
+    # Lookup policy
+    policy = policies_client.LookupPolicy(
+        policies_service_pb2.LookupPolicyRequest(
+            protected_resource=resource_name
+        )
+    )
+    
+    # Remove user from role
+    try:
+        updated_policy = policies_client.RemovePolicyBindingMembers(
+            policies_service_pb2.RemovePolicyBindingMembersRequest(
+                name=policy.name,
+                role=f"roles/{role_name}",
+                members=[f"principals/{user_id}"],
+                etag=policy.etag
+            )
+        )
+        print(f"Revoked {role_name} from {user_id} on {resource_name}")
+        return updated_policy
+    except grpc.RpcError as e:
+        if "POLICY_BINDING_MEMBERSHIP_NOT_FOUND" in e.details():
+            print(f"User {user_id} didn't have {role_name} role")
+        raise
+```
+
+### Transferring Ownership
+
+```python
+def transfer_ownership(resource_name, old_owner_id, new_owner_id):
+    """
+    Transfer ownership by swapping principals in admin role.
+    
+    Args:
+        resource_name: Protected resource name
+        old_owner_id: Current owner principal ID
+        new_owner_id: New owner principal ID
+    """
+    policy = policies_client.LookupPolicy(
+        policies_service_pb2.LookupPolicyRequest(
+            protected_resource=resource_name
+        )
+    )
+    
+    # Add new owner
+    policy = policies_client.AddPolicyBindingMembers(
+        policies_service_pb2.AddPolicyBindingMembersRequest(
+            name=policy.name,
+            role="roles/measurement-admin",
+            members=[f"principals/{new_owner_id}"],
+            etag=policy.etag
+        )
+    )
+    
+    # Remove old owner
+    policy = policies_client.RemovePolicyBindingMembers(
+        policies_service_pb2.RemovePolicyBindingMembersRequest(
+            name=policy.name,
+            role="roles/measurement-admin",
+            members=[f"principals/{old_owner_id}"],
+            etag=policy.etag
+        )
+    )
+    
+    print(f"Transferred ownership from {old_owner_id} to {new_owner_id}")
+    return policy
+```
+
+### Listing All Members with a Role
+
+```python
+def list_role_members(resource_name, role_name):
+    """
+    List all principals that have a specific role on a resource.
+    
+    Args:
+        resource_name: Protected resource name
+        role_name: Role to query
+    
+    Returns:
+        List of principal names
+    """
+    policy = policies_client.LookupPolicy(
+        policies_service_pb2.LookupPolicyRequest(
+            protected_resource=resource_name
+        )
+    )
+    
+    role_resource_name = f"roles/{role_name}"
+    
+    for binding in policy.bindings:
+        if binding.role == role_resource_name:
+            return binding.members
+    
+    return []  # Role not found in policy
+
+# Usage
+admins = list_role_members(
+    resource_name="measurementConsumers/123",
+    role_name="measurement-admin"
+)
+print(f"Admins: {admins}")
+```
+
+## Concurrency Control with ETags
+
+Policies use ETags to prevent lost updates:
+
+```python
+def safe_add_member_with_retry(policy_name, role, member, max_retries=3):
+    """
+    Add member with automatic retry on concurrent modification.
+    
+    Args:
+        policy_name: Policy resource name
+        role: Role to add member to
+        member: Principal to add
+        max_retries: Maximum retry attempts
+    """
+    for attempt in range(max_retries):
+        try:
+            # Get current policy
+            policy = policies_client.GetPolicy(
+                policies_service_pb2.GetPolicyRequest(name=policy_name)
+            )
+            
+            # Try to add member with current etag
+            return policies_client.AddPolicyBindingMembers(
+                policies_service_pb2.AddPolicyBindingMembersRequest(
+                    name=policy_name,
+                    role=role,
+                    members=[member],
+                    etag=policy.etag  # Use current etag
+                )
+            )
+            
+        except grpc.RpcError as e:
+            if "ETAG_MISMATCH" in e.details() and attempt < max_retries - 1:
+                print(f"Concurrent modification detected, retrying ({attempt + 1}/{max_retries})")
+                continue
+            raise
+    
+    raise Exception(f"Failed to add member after {max_retries} attempts")
+```
+
+## Policy Hierarchy
+
+Policies can be organized hierarchically:
+
+```
+Root Policy (policies/root)
+├── measurementConsumers/123 (policies/mc-123)
+│   ├── reports/456 (policies/mc-123-report-456)
+│   └── metrics/789 (policies/mc-123-metric-789)
+└── measurementConsumers/456 (policies/mc-456)
+```
+
+<Note>
+Policy inheritance is not automatic. Each resource must have its own policy explicitly created. However, applications can implement inheritance logic when checking permissions.
+</Note>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use ETags for updates">
+    Always provide the etag when adding or removing members to prevent concurrent modification issues.
+  </Accordion>
+  
+  <Accordion title="Create policies at resource creation">
+    When creating a new resource (measurement consumer, report, etc.), immediately create its policy with the creator as admin.
+  </Accordion>
+  
+  <Accordion title="Minimize policy bindings">
+    Use roles with multiple permissions rather than creating many bindings with single permissions.
+  </Accordion>
+  
+  <Accordion title="Audit policy changes">
+    Log all policy modifications (add/remove members) with timestamps and operator IDs for security auditing.
+  </Accordion>
+  
+  <Accordion title="Validate principals before adding">
+    Check that principals exist before adding them to policies to avoid PRINCIPAL_NOT_FOUND errors.
+  </Accordion>
+  
+  <Accordion title="Handle concurrent modifications">
+    Implement retry logic for etag mismatches when multiple systems might modify the same policy.
+  </Accordion>
+</AccordionGroup>
+
+## Error Handling
+
+<ResponseField name="POLICY_NOT_FOUND" type="error">
+  Policy does not exist
+  
+  **Resolution:** Create policy first or verify policy name
+</ResponseField>
+
+<ResponseField name="POLICY_NOT_FOUND_FOR_PROTECTED_RESOURCE" type="error">
+  No policy exists for the specified protected resource
+  
+  **Resolution:** Create policy for the resource using CreatePolicy
+</ResponseField>
+
+<ResponseField name="ETAG_MISMATCH" type="error">
+  ETag doesn't match current policy version
+  
+  **Resolution:** Refetch policy to get current etag and retry
+</ResponseField>
+
+<ResponseField name="ROLE_NOT_FOUND" type="error">
+  Role does not exist in the system
+  
+  **Resolution:** Verify role name and create role if needed
+</ResponseField>
+
+<ResponseField name="PRINCIPAL_NOT_FOUND" type="error">
+  One or more principals don't exist
+  
+  **Resolution:** Create principals first before adding to policy
+</ResponseField>
+
+<ResponseField name="POLICY_ALREADY_EXISTS" type="error">
+  Policy already exists for this protected resource
+  
+  **Resolution:** Use LookupPolicy to get existing policy and modify it
+</ResponseField>
+
+## Related APIs
+
+<CardGroup cols={3}>
+  <Card title="Principals Service" icon="user" href="/api/access/principals">
+    Manage principals (users and services)
+  </Card>
+  
+  <Card title="Permissions Service" icon="key" href="/api/access/permissions">
+    Check and manage permissions
+  </Card>
+  
+  <Card title="API Overview" icon="book" href="/api/overview">
+    Access control architecture
+  </Card>
+</CardGroup>

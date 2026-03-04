@@ -1,0 +1,546 @@
+---
+title: Mill Protocols
+description: Cryptographic protocols for secure multi-party computation in Duchies
+---
+
+Mill workers execute **cryptographic protocols** that enable multiple duchies to collaboratively compute aggregate measurements without any single party seeing individual user data. These protocols are the heart of the privacy-preserving computation system.
+
+## Overview
+
+Mills are **computation workers** that:
+
+- Execute stages of multi-party computation protocols
+- Process encrypted sketch data
+- Coordinate with peer duchies
+- Produce aggregate results while preserving individual privacy
+- Run as Kubernetes Jobs created by the Mill Job Scheduler
+
+<CardGroup cols={2}>
+  <Card title="Liquid Legions V2" icon="shield-halved">
+    Primary protocol for reach and frequency measurements
+  </Card>
+  <Card title="Reach-Only LLv2" icon="users">
+    Optimized variant for reach-only measurements
+  </Card>
+  <Card title="Honest Majority Share Shuffle" icon="shuffle">
+    Alternative protocol with different trust assumptions
+  </Card>
+  <Card title="TrusTee" icon="microchip">
+    Trusted execution environment based protocol
+  </Card>
+</CardGroup>
+
+## Mill Base Architecture
+
+All mill workers extend the `MillBase` class, which provides common functionality:
+
+**File**: `src/main/kotlin/org/wfanet/measurement/duchy/mill/MillBase.kt`
+
+### Common Responsibilities
+
+<Accordion title="Work Claiming">
+  - Query Internal API for claimable work
+  - Acquire work lock with token-based locking
+  - Prevent duplicate execution across workers
+</Accordion>
+
+<Accordion title="Stage Execution">
+  - Determine current protocol stage
+  - Execute stage-specific computation logic
+  - Advance to next stage upon completion
+  - Handle stage-specific errors and retries
+</Accordion>
+
+<Accordion title="Peer Coordination">
+  - Send encrypted data to peer duchies
+  - Call peer Computation Control endpoints
+  - Receive and validate peer responses
+  - Handle peer timeouts and failures
+</Accordion>
+
+<Accordion title="Data Management">
+  - Read encrypted sketches from blob storage
+  - Process data in configurable chunk sizes
+  - Write intermediate results to blob storage
+  - Clean up temporary computation artifacts
+</Accordion>
+
+<Accordion title="Result Reporting">
+  - Confirm computation participation with Kingdom
+  - Report final results to Kingdom System API
+  - Handle result verification and validation
+</Accordion>
+
+### Configuration Parameters
+
+All mills support:
+
+```bash
+--duchy-name={duchy-id}
+--duchy-info-config=/var/run/secrets/files/duchy_cert_config.textproto
+--tls-cert-file=/var/run/secrets/files/{duchy}_tls.pem
+--tls-key-file=/var/run/secrets/files/{duchy}_tls.key
+--cert-collection-file=/var/run/secrets/files/all_root_certs.pem
+--computations-service-target={internal-api-server}:8443
+--computations-service-cert-host=localhost
+--kingdom-system-api-target={kingdom-endpoint}
+--kingdom-system-api-cert-host=localhost
+--parallelism=2  # Parallel block processing
+--work-lock-duration=5m  # How long to hold work lock
+```
+
+Plus protocol-specific and blob storage flags.
+
+## Liquid Legions V2 Protocol
+
+**Images**: 
+- `duchy/liquid-legions-v2-mill` (reach & frequency)
+- Reach-only variant uses same image with different config
+
+**PodTemplate Name**: `{duchy}-llv2-mill`
+
+### Purpose
+
+Liquid Legions V2 (LLv2) is the **primary MPC protocol** for computing reach and frequency measurements. It uses threshold homomorphic encryption and secure shuffling to enable privacy-preserving aggregation.
+
+### Implementation
+
+**Base Class**: `src/main/kotlin/org/wfanet/measurement/duchy/mill/liquidlegionsv2/LiquidLegionsV2Mill.kt`
+
+**Concrete Implementations**:
+- `ReachFrequencyLiquidLegionsV2Mill.kt`: Full reach and frequency
+- `ReachOnlyLiquidLegionsV2Mill.kt`: Optimized for reach-only
+
+### Protocol Stages
+
+The LLv2 protocol executes in multiple stages. For a 3-duchy deployment:
+
+<Steps>
+  <Step title="Initialization">
+    Each duchy:
+    - Retrieves encrypted sketches from EDPs
+    - Validates requisition fulfillment
+    - Prepares sketch data for computation
+    - Confirms participation with Kingdom
+  </Step>
+  
+  <Step title="Setup Phase">
+    - Generate or retrieve commitment to randomness
+    - Set up encryption/decryption keys
+    - Initialize protocol state
+    - Coordinate with peer duchies
+  </Step>
+  
+  <Step title="Execution Phase (Non-Aggregator)">
+    Non-aggregator duchies:
+    - Apply cryptographic transformations
+    - Shuffle encrypted sketch elements
+    - Re-encrypt data with blinding factors
+    - Pass results to next duchy in sequence
+  </Step>
+  
+  <Step title="Execution Phase (Aggregator)">
+    Aggregator duchy:
+    - Receives data from all non-aggregators
+    - Combines encrypted sketches
+    - Performs homomorphic aggregation
+    - Prepares for collaborative decryption
+  </Step>
+  
+  <Step title="Completion Phase">
+    All duchies:
+    - Participate in threshold decryption
+    - Contribute decryption shares
+    - Aggregator reconstructs plaintext result
+    - Report final measurement to Kingdom
+  </Step>
+</Steps>
+
+### Cryptographic Operations
+
+Implemented in `src/main/kotlin/org/wfanet/measurement/duchy/mill/liquidlegionsv2/crypto/`:
+
+<Accordion title="Encryption">
+  **File**: `LiquidLegionsV2Encryption.kt`
+  
+  - ElGamal encryption over elliptic curves
+  - Threshold encryption requiring multiple duchies to decrypt
+  - Homomorphic properties for aggregation
+  - Re-encryption for privacy amplification
+  
+  **JNI Implementation**: `JniLiquidLegionsV2Encryption.kt`
+  - Calls native C++ crypto library
+  - Optimized for performance
+  - Supports hardware acceleration
+</Accordion>
+
+<Accordion title="Reach-Only Optimization">
+  **File**: `ReachOnlyLiquidLegionsV2Encryption.kt`
+  
+  For reach-only measurements:
+  - Simplified protocol without frequency distribution
+  - Faster execution (fewer cryptographic operations)
+  - Reduced data size
+  - More efficient for use cases not requiring frequency
+</Accordion>
+
+### Consent Signaling
+
+LLv2 mills verify consent signaling:
+
+```bash
+--consent-signaling-certificate-der-file=/var/run/secrets/files/{duchy}_cs_cert.der
+--consent-signaling-private-key-der-file=/var/run/secrets/files/{duchy}_cs_private.der
+--consent-signaling-certificate-resource-name={cs-cert-resource-name}
+```
+
+**Purpose**:
+- Verify EDP authorization for data participation
+- Validate data provider participation in measurement
+- Ensure compliance with privacy regulations
+- Sign protocol messages for non-repudiation
+
+### Worker Stubs
+
+LLv2 mills need to communicate with peer duchies:
+
+```bash
+--duchy-computation-control-target=worker1={worker1-endpoint}
+--duchy-computation-control-target=worker2={worker2-endpoint}
+--duchy-computation-control-target=aggregator={aggregator-endpoint}
+```
+
+These specify the Computation Control Server endpoints for each peer duchy.
+
+### Performance Configuration
+
+**Parallelism**:
+```bash
+--parallelism=2  # Process 2 blocks concurrently
+```
+
+Higher parallelism:
+- ✅ Faster computation for large datasets
+- ❌ Higher memory usage
+- ❌ More CPU cores required
+
+**Chunk Size**:
+```bash
+--request-chunk-size-bytes=32768  # 32 KB chunks
+```
+
+Controls data transfer size to peer duchies.
+
+### Resource Requirements
+
+LLv2 mills are computationally intensive:
+
+**Typical Resources**:
+```yaml
+requests:
+  cpu: 2000m      # 2 CPU cores
+  memory: 4Gi     # 4 GB RAM
+limits:
+  cpu: 4000m      # Up to 4 cores
+  memory: 8Gi     # Up to 8 GB
+```
+
+Actual requirements depend on:
+- Dataset size
+- Number of event groups
+- Sketch complexity
+- Frequency histogram buckets
+
+## Honest Majority Share Shuffle (HMSS)
+
+**Image**: `duchy/honest-majority-share-shuffle-mill`  
+**PodTemplate Name**: `{duchy}-hmss-mill`
+
+### Purpose
+
+HMSS is an **alternative MPC protocol** with different security properties:
+
+- Requires honest majority (> 50% of duchies honest)
+- Potentially faster than LLv2 for some workloads
+- Different cryptographic primitives (secret sharing)
+- Suitable for scenarios with stronger trust assumptions
+
+### Implementation
+
+**File**: `src/main/kotlin/org/wfanet/measurement/duchy/mill/shareshuffle/HonestMajorityShareShuffleMill.kt`
+
+**Crypto**: `crypto/HonestMajorityShareShuffleCryptor.kt`
+
+### Protocol Characteristics
+
+<Accordion title="Secret Sharing">
+  Uses additive secret sharing:
+  - Data split into shares across duchies
+  - Reconstruction requires shares from majority
+  - Operations performed on shares
+  - Final result reconstructed collaboratively
+</Accordion>
+
+<Accordion title="Shuffle Phase">
+  Secure shuffling of secret shares:
+  - Each duchy applies random permutation
+  - Composition of shuffles provides anonymity
+  - Prevents linking input to output
+</Accordion>
+
+<Accordion title="Aggregation">
+  Homomorphic aggregation on shares:
+  - Combine shares without reconstruction
+  - Aggregate across event groups
+  - Produce aggregate shares
+  - Reconstruct final aggregate
+</Accordion>
+
+### Key Encryption
+
+HMSS may use key encryption keys:
+
+```bash
+--key-encryption-key-file=/var/run/secrets/files/duchy_kek.bin
+```
+
+This encrypts duchy private keys stored in the database.
+
+### Configuration
+
+```bash
+# All standard mill flags plus:
+--protocols-setup-config=/var/run/secrets/files/{protocols_setup_config}
+--kingdom-public-api-target={kingdom-public-api-endpoint}
+--kingdom-public-api-cert-host=localhost
+```
+
+HMSS requires access to Kingdom Public API for certain protocol operations.
+
+## TrusTee Protocol
+
+**Image**: `duchy/trustee-mill` (or dedicated deployment)  
+**Type**: Trusted Execution Environment based
+
+### Purpose
+
+TrusTee leverages **Trusted Execution Environments (TEEs)** like Intel SGX or AMD SEV for privacy:
+
+- Code executes in secure enclave
+- Even cloud provider cannot access data
+- Attestation proves code integrity
+- Potentially simpler protocols than pure MPC
+
+### Implementation
+
+**File**: `src/main/kotlin/org/wfanet/measurement/duchy/mill/trustee/TrusTeeMill.kt`
+
+**Processor**: `processor/TrusTeeProcessor.kt`
+
+### Protocol Flow
+
+TrusTee may have different coordination model:
+- Computations may run within TEE
+- Attestation verifies correct execution
+- Results sealed with TEE keys
+- Kingdom verifies attestation before accepting results
+
+<Note>
+TrusTee support is optional and may not be enabled in all deployments. Check protocol configuration.
+</Note>
+
+## Mill Execution Flow
+
+### Job Creation
+
+1. Mill Job Scheduler polls for work
+2. Scheduler creates Kubernetes Job from PodTemplate
+3. Job runs mill worker container
+4. Mill worker claims specific computation stage
+
+### Stage Processing
+
+```kotlin
+// Pseudocode for mill execution
+while (true) {
+  val work = claimWork() ?: break
+  
+  try {
+    val stage = work.currentStage
+    val result = executeStage(stage, work)
+    
+    if (result.needsPeerCoordination) {
+      sendResultToPeers(result)
+    }
+    
+    advanceToNextStage(work, result)
+  } catch (e: Exception) {
+    handleError(work, e)
+  } finally {
+    releaseWorkLock(work)
+  }
+}
+```
+
+### Error Handling
+
+<Accordion title="Transient Failures">
+  Network errors, temporary service unavailability:
+  - Retry with exponential backoff
+  - Maximum attempts (default 10)
+  - Preserve work lock during retry
+</Accordion>
+
+<Accordion title="Protocol Failures">
+  Invalid data, cryptographic errors:
+  - Mark computation as failed
+  - Report failure to Kingdom
+  - Log detailed error information
+  - Do not retry (permanent failure)
+</Accordion>
+
+<Accordion title="Timeout Handling">
+  Stage takes too long:
+  - Work lock expires
+  - Another worker can claim the work
+  - Original worker should detect lock loss and exit
+</Accordion>
+
+## Monitoring and Debugging
+
+### Metrics to Monitor
+
+<CardGroup cols={2}>
+  <Card title="Stage Duration" icon="stopwatch">
+    Time to complete each protocol stage
+  </Card>
+  <Card title="Success Rate" icon="circle-check">
+    Percentage of computations completing successfully
+  </Card>
+  <Card title="Retry Rate" icon="rotate">
+    Frequency of stage retries
+  </Card>
+  <Card title="Peer Latency" icon="network-wired">
+    Time to communicate with peer duchies
+  </Card>
+</CardGroup>
+
+### Debugging Failed Computations
+
+**Check mill worker logs**:
+```bash
+kubectl logs job/{duchy}-llv2-mill-{computation-id}
+```
+
+**Look for common issues**:
+- Certificate validation errors
+- Peer duchy unreachable
+- Blob storage access issues
+- Insufficient memory/CPU
+- Cryptographic operation failures
+
+**Check computation state**:
+```bash
+# Query duchy Internal API for computation details
+```
+
+**Verify peer coordination**:
+```bash
+# Check if peer duchies received the data
+kubectl logs -l app={peer-duchy}-computation-control-server-app
+```
+
+## Security Considerations
+
+<Note>
+**Critical**: Mills handle sensitive cryptographic operations. Secure deployment is essential for privacy guarantees.
+</Note>
+
+### Key Protection
+
+- **Private Keys**: Never log or expose duchy private keys
+- **Key Storage**: Use Kubernetes secrets with encryption at rest
+- **Key Rotation**: Support key rotation without downtime
+- **HSM Integration**: Consider HSM for production key storage
+
+### Data Handling
+
+- **Encrypted Data Only**: Mills only process encrypted sketches
+- **Secure Deletion**: Clean up temporary data after computation
+- **Access Control**: Strict RBAC for blob storage
+- **Audit Logging**: Log all data access and operations
+
+### Network Security
+
+- **Mutual TLS**: All peer communication uses mTLS
+- **Certificate Pinning**: Verify peer duchy certificates
+- **Network Policies**: Restrict mill network access
+- **Egress Filtering**: Only allow necessary outbound traffic
+
+## Performance Optimization
+
+### Tuning Parameters
+
+<Accordion title="Parallelism">
+  Increase `--parallelism` for large datasets:
+  - Requires more CPU and memory
+  - Diminishing returns beyond 4-8
+  - Test with representative workloads
+</Accordion>
+
+<Accordion title="Chunk Size">
+  Adjust `--request-chunk-size-bytes`:
+  - Larger chunks: fewer RPCs, more memory
+  - Smaller chunks: more overhead, less memory
+  - Typical: 32-128 KB
+</Accordion>
+
+<Accordion title="Work Lock Duration">
+  Set based on empirical stage duration:
+  - Monitor actual completion times
+  - Set lock duration to 2-3x P95 latency
+  - Avoid locks expiring during normal execution
+</Accordion>
+
+<Accordion title="Resource Limits">
+  Allocate sufficient resources:
+  - Profile memory usage with real data
+  - Ensure CPU doesn't throttle crypto operations
+  - Consider SSD for blob storage cache
+</Accordion>
+
+## Best Practices
+
+### Development
+
+- Test protocols with synthetic data before production
+- Verify all peer duchy configurations match
+- Use verbose logging during initial deployment
+- Monitor resource usage and adjust limits
+
+### Production
+
+- Set appropriate work lock durations based on metrics
+- Configure concurrency limits to prevent resource exhaustion
+- Implement monitoring and alerting for mill failures
+- Plan for key rotation and certificate renewal
+- Have runbooks for common failure scenarios
+
+### Troubleshooting
+
+- Always check mill worker logs first
+- Verify peer duchy reachability and health
+- Check blob storage access and quotas
+- Monitor Kubernetes Job status and events
+- Compare protocol configurations across duchies
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Duchy Overview" icon="building" href="/components/duchy/overview">
+    Return to duchy architecture overview
+  </Card>
+  <Card title="Kingdom Services" icon="crown" href="/components/kingdom/services">
+    Learn how Kingdom orchestrates computations
+  </Card>
+</CardGroup>

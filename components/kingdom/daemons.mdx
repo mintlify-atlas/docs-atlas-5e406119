@@ -1,0 +1,359 @@
+---
+title: Kingdom Daemons
+description: Background jobs and scheduled tasks in the Kingdom
+---
+
+The Kingdom runs several **CronJob** deployments that perform scheduled maintenance and cleanup operations. These background jobs help maintain system health and enforce data retention policies.
+
+## Overview
+
+Kingdom daemons are implemented as Kubernetes CronJobs that run on a scheduled basis. They communicate with the Kingdom Data Server to perform database operations.
+
+<CardGroup cols={3}>
+  <Card title="Completed Measurements Deletion" icon="trash">
+    Removes old completed measurements based on TTL
+  </Card>
+  <Card title="Pending Measurements Cancellation" icon="ban">
+    Cancels stale pending measurements
+  </Card>
+  <Card title="Exchanges Deletion" icon="calendar-xmark">
+    Cleans up old panel exchange data
+  </Card>
+</CardGroup>
+
+## Completed Measurements Deletion
+
+**Image**: `kingdom/completed-measurements-deletion`  
+**Schedule**: `15 * * * *` (Hourly, 15 minutes past the hour)  
+**CronJob Name**: `completed-measurements-deletion`
+
+### Purpose
+
+This job periodically deletes completed measurements that have exceeded their time-to-live (TTL) threshold. This helps:
+
+- Reduce database storage costs
+- Maintain query performance
+- Comply with data retention policies
+- Remove unnecessary historical data
+
+### Configuration Parameters
+
+<Accordion title="Time to Live (TTL)">
+  **Flag**: `--time-to-live=180d`  
+  **Default**: 180 days  
+  **Description**: How long to retain completed measurements before deletion.
+  
+  Measurements in terminal states (SUCCEEDED, FAILED, CANCELLED) older than this threshold are eligible for deletion.
+</Accordion>
+
+<Accordion title="Max Deletions Per RPC">
+  **Flag**: `--max-to-delete-per-rpc=25`  
+  **Default**: 25  
+  **Description**: Maximum number of measurements to delete in a single RPC call.
+  
+  This prevents overwhelming the database with large batch deletes and provides rate limiting.
+</Accordion>
+
+<Accordion title="Dry Run Mode">
+  **Flag**: `--dry-run=false`  
+  **Default**: false  
+  **Description**: When enabled, logs which measurements would be deleted without actually deleting them.
+  
+  Useful for testing retention policies before applying them.
+</Accordion>
+
+### Operation
+
+1. **Query**: Identifies completed measurements older than TTL
+2. **Batch**: Groups deletions into batches of `max-to-delete-per-rpc`
+3. **Delete**: Removes measurements via the Kingdom Data Server API
+4. **Log**: Records deletion operations for audit purposes
+
+### Example Configuration
+
+```yaml
+schedule: "15 * * * *"  # Every hour at :15
+args:
+  - --internal-api-target=gcp-kingdom-data-server:8443
+  - --internal-api-cert-host=localhost
+  - --tls-cert-file=/var/run/secrets/files/kingdom_tls.pem
+  - --tls-key-file=/var/run/secrets/files/kingdom_tls.key
+  - --cert-collection-file=/var/run/secrets/files/all_root_certs.pem
+  - --time-to-live=180d
+  - --max-to-delete-per-rpc=25
+  - --dry-run=false
+```
+
+<Note>
+The hourly schedule ensures regular cleanup without creating excessive database load. The :15 timing is offset from other jobs to distribute load.
+</Note>
+
+## Pending Measurements Cancellation
+
+**Image**: `kingdom/pending-measurements-cancellation`  
+**Schedule**: `45 * * * *` (Hourly, 45 minutes past the hour)  
+**CronJob Name**: `pending-measurements-cancellation`
+
+### Purpose
+
+This job automatically cancels measurements that have been stuck in pending states for too long. This prevents:
+
+- Resource leaks from abandoned measurements
+- Confusion from stale pending measurements
+- Indefinite waiting on failed or unresponsive participants
+
+### Configuration Parameters
+
+<Accordion title="Time to Live (TTL)">
+  **Flag**: `--time-to-live=15d`  
+  **Default**: 15 days  
+  **Description**: How long to keep measurements in pending states before cancellation.
+  
+  Measurements that have been pending longer than this duration are automatically cancelled.
+</Accordion>
+
+<Accordion title="Dry Run Mode">
+  **Flag**: `--dry-run=false`  
+  **Default**: false  
+  **Description**: When enabled, logs which measurements would be cancelled without actually cancelling them.
+</Accordion>
+
+### Pending States
+
+The job targets measurements in non-terminal states such as:
+- `PENDING_REQUISITION_PARAMS`: Waiting for requisition parameters
+- `PENDING_REQUISITION_FULFILLMENT`: Waiting for EDP data
+- `PENDING_PARTICIPANT_CONFIRMATION`: Waiting for duchy confirmation
+- `PENDING_COMPUTATION`: Queued but not yet computing
+
+### Operation
+
+1. **Identify**: Finds measurements in pending states older than TTL
+2. **Validate**: Confirms measurements are truly stale (not just slow)
+3. **Cancel**: Transitions measurements to CANCELLED state
+4. **Notify**: May trigger notifications to measurement requestors
+5. **Log**: Records cancellation for audit and debugging
+
+### Example Configuration
+
+```yaml
+schedule: "45 * * * *"  # Every hour at :45
+args:
+  - --internal-api-target=gcp-kingdom-data-server:8443
+  - --internal-api-cert-host=localhost
+  - --tls-cert-file=/var/run/secrets/files/kingdom_tls.pem
+  - --tls-key-file=/var/run/secrets/files/kingdom_tls.key
+  - --cert-collection-file=/var/run/secrets/files/all_root_certs.pem
+  - --time-to-live=15d
+  - --dry-run=false
+```
+
+<Note>
+The 15-day TTL is shorter than the completed measurements TTL (180d) because pending measurements consume active resources and should be resolved or cancelled more quickly.
+</Note>
+
+## Exchanges Deletion
+
+**Image**: `kingdom/exchanges-deletion`  
+**Schedule**: `40 6 * * *` (Daily at 6:40 AM)  
+**CronJob Name**: `exchanges-deletion`
+
+### Purpose
+
+This job cleans up old panel exchange data to:
+
+- Remove completed exchange workflows
+- Free up storage from exchange intermediate data
+- Maintain manageable exchange history
+- Comply with data retention requirements
+
+### Configuration Parameters
+
+<Accordion title="Days to Live">
+  **Flag**: `--days-to-live=100`  
+  **Default**: 100 days  
+  **Description**: Number of days to retain exchange data.
+  
+  Panel exchanges older than this are eligible for deletion.
+</Accordion>
+
+<Accordion title="Dry Run Mode">
+  **Flag**: `--dry-run=false`  
+  **Default**: false  
+  **Description**: When enabled, logs which exchanges would be deleted without actually deleting them.
+</Accordion>
+
+### Exchange Data
+
+Panel exchanges involve:
+- Exchange workflow definitions
+- Exchange steps and their execution history
+- Exchange step attempts and retry information
+- Intermediate computation results
+- Metadata and checkpoints
+
+### Operation
+
+1. **Query**: Identifies exchanges older than the retention period
+2. **Cascade**: Deletes related exchange steps, attempts, and metadata
+3. **Clean**: Removes associated blob storage (if applicable)
+4. **Log**: Records deletion operations
+
+### Example Configuration
+
+```yaml
+schedule: "40 6 * * *"  # Daily at 6:40 AM
+args:
+  - --internal-api-target=gcp-kingdom-data-server:8443
+  - --internal-api-cert-host=localhost
+  - --tls-cert-file=/var/run/secrets/files/kingdom_tls.pem
+  - --tls-key-file=/var/run/secrets/files/kingdom_tls.key
+  - --cert-collection-file=/var/run/secrets/files/all_root_certs.pem
+  - --days-to-live=100
+  - --dry-run=false
+```
+
+<Note>
+The daily schedule (rather than hourly) reflects that panel exchanges are longer-running workflows that don't require frequent cleanup.
+</Note>
+
+## Common Configuration
+
+All Kingdom daemons share common configuration patterns:
+
+### Authentication
+
+```bash
+--internal-api-target=gcp-kingdom-data-server:8443
+--internal-api-cert-host=localhost
+--tls-cert-file=/var/run/secrets/files/kingdom_tls.pem
+--tls-key-file=/var/run/secrets/files/kingdom_tls.key
+--cert-collection-file=/var/run/secrets/files/all_root_certs.pem
+```
+
+All jobs authenticate to the Kingdom Data Server using mutual TLS.
+
+### Logging
+
+```bash
+--debug-verbose-grpc-client-logging=[true|false]
+```
+
+Enables detailed gRPC logging for debugging.
+
+### Kubernetes Configuration
+
+All CronJobs are configured with:
+- **Secrets**: Access to kingdom TLS certificates and keys
+- **Network Policies**: Restricted to communicate only with Data Server
+- **Resource Limits**: CPU and memory constraints
+- **Concurrency Policy**: Typically `Forbid` to prevent overlapping runs
+- **Success/Failure History**: Limited retention of job history
+
+## Deployment Pattern
+
+Kingdom daemons follow a consistent deployment pattern defined in `kingdom.cue`:
+
+```cue
+cronJobs: [Name=_]: #CronJob & {
+  _name:       strings.TrimSuffix(Name, "-cronjob")
+  _secretName: _kingdom_secret_name
+  _system:     "kingdom"
+  _container: {
+    image: _images[_name]
+  }
+}
+```
+
+This ensures:
+- Consistent naming conventions
+- Shared secret management
+- Unified image versioning
+- Standard container configuration
+
+## Monitoring and Alerting
+
+<CardGroup cols={2}>
+  <Card title="Job Success Rate" icon="chart-line">
+    Monitor CronJob completion status and failure rates
+  </Card>
+  <Card title="Deletion Metrics" icon="gauge">
+    Track number of records deleted per run
+  </Card>
+  <Card title="Execution Duration" icon="clock">
+    Alert on jobs that take unusually long to complete
+  </Card>
+  <Card title="Dry Run Testing" icon="flask">
+    Use dry-run mode to validate before enabling deletions
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+### Retention Policy Design
+
+<Accordion title="Align with Business Requirements">
+  Set TTL values based on:
+  - Legal/compliance retention requirements
+  - Storage budget constraints
+  - Query performance needs
+  - Historical analysis requirements
+</Accordion>
+
+<Accordion title="Test with Dry Run">
+  Always test retention policies with `--dry-run=true` before enabling deletions:
+  ```bash
+  # Review what would be deleted
+  kubectl logs -l app=completed-measurements-deletion-app
+  ```
+</Accordion>
+
+<Accordion title="Monitor Storage Impact">
+  Track database storage metrics before and after deletion jobs to validate effectiveness.
+</Accordion>
+
+### Troubleshooting
+
+**Job Not Running:**
+```bash
+# Check CronJob status
+kubectl get cronjobs
+
+# View recent job executions
+kubectl get jobs --sort-by=.status.startTime
+
+# Check job logs
+kubectl logs job/completed-measurements-deletion-xxxxx
+```
+
+**Excessive Deletions:**
+- Enable dry-run mode immediately
+- Review TTL configuration
+- Check for clock skew or incorrect timestamps
+- Restore from backups if necessary
+
+**Insufficient Deletions:**
+- Verify TTL is configured correctly
+- Check that jobs are running on schedule
+- Verify network connectivity to Data Server
+- Review job logs for errors
+
+## Network Policies
+
+Each daemon has a corresponding network policy that:
+- Allows ingress: None (jobs initiate outbound connections only)
+- Allows egress to: `gcp-kingdom-data-server`
+- Denies all other traffic
+
+This ensures daemons can only communicate with the Data Server and cannot be accessed externally.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Kingdom Overview" icon="kingdom" href="/components/kingdom/overview">
+    Return to Kingdom architecture overview
+  </Card>
+  <Card title="Duchy Daemons" icon="robot" href="/components/duchy/daemons">
+    Learn about Duchy background jobs
+  </Card>
+</CardGroup>

@@ -1,0 +1,315 @@
+---
+title: "Sketches"
+description: "Probabilistic data structures for privacy-preserving cardinality and frequency estimation"
+---
+
+## What are Sketches?
+
+Sketches are compact, probabilistic data structures that enable approximate counting and frequency estimation with strong privacy guarantees. In the Halo Cross-Media Measurement System, publishers use sketches to represent their user populations in a form that can be:
+
+- **Encrypted**: Protected from unauthorized access
+- **Aggregated**: Combined across multiple publishers
+- **Measured**: Used to estimate reach and frequency
+- **Private**: Impossible to reverse-engineer individual user data
+
+<Info>
+Sketches are inspired by algorithms like HyperLogLog, but modified significantly to support encryption, secure multiparty computation, and differential privacy.
+</Info>
+
+## Why Use Sketches?
+
+Direct counting of unique users across publishers faces several challenges:
+
+| Challenge | How Sketches Help |
+|-----------|------------------|
+| **Privacy** | Cannot reverse-engineer individual users from sketch | 
+| **Encryption** | Sketches support homomorphic operations when encrypted |
+| **Scalability** | Fixed-size representation regardless of audience size |
+| **Accuracy** | Probabilistic but statistically rigorous estimates |
+| **Cross-publisher** | Sketches from different publishers can be combined |
+
+## Sketch Structure
+
+A sketch consists of multiple **registers**, where each register stores information about a subset of users:
+
+### Register Components
+
+Each register in a Liquid Legions sketch contains:
+
+<Tabs>
+  <Tab title="Index">
+    **Register Index**: Determines which register a user contributes to
+    
+    - Derived from hashing user identifiers
+    - Distributes users uniformly across registers
+    - Enables independent estimation from each register
+    
+    Example: A sketch with 2^20 registers has indices from 0 to 1,048,575
+  </Tab>
+  
+  <Tab title="Key">
+    **Key Value**: Encrypted identifier for the user
+    
+    - Enables counting unique users across multiple publishers
+    - Encrypted using ElGamal with the composite Duchy public key
+    - Same user from different publishers produces the same key (when deterministic)
+    
+    This allows the MPC protocol to identify when different publishers saw the same user.
+  </Tab>
+  
+  <Tab title="Count">
+    **Count Value**: Encrypted frequency information
+    
+    - Represents how many times the user was exposed
+    - Also encrypted with ElGamal
+    - Used to build frequency distributions
+    
+    For reach-only measurements, counts are omitted to improve efficiency.
+  </Tab>
+</Tabs>
+
+### Sketch Size Parameters
+
+Sketches are configured with several parameters:
+
+```protobuf
+// From liquid_legions_sketch_parameter.proto
+- decay_rate: Controls accuracy vs. sketch size
+- size: Total number of registers (typically 2^20 to 2^25)
+- sampling_rate: Fraction of users included in the sketch
+- max_frequency: Maximum frequency value tracked
+```
+
+<Note>
+**Trade-off**: Larger sketches (more registers) provide better accuracy but increase computation cost and bandwidth requirements.
+</Note>
+
+## How Publishers Compute Sketches
+
+Publishers follow these steps to create encrypted sketches:
+
+<Steps>
+  <Step title="Hash User Identifiers">
+    For each user in the campaign audience:
+    
+    1. Hash the user identifier to determine the register index
+    2. Hash the identifier again to create the key value
+    3. Track the frequency (exposure count) for the user
+  </Step>
+  
+  <Step title="Apply Differential Privacy">
+    Add publisher-level noise:
+    
+    - Some users are randomly added or removed
+    - Frequencies are perturbed
+    - Noise calibrated to achieve the required privacy budget
+  </Step>
+  
+  <Step title="Encrypt Register Values">
+    Encrypt each register's key and count:
+    
+    - Map plaintext values to elliptic curve points
+    - Encrypt using ElGamal with the composite Duchy public key
+    - Each register becomes a pair of ElGamal ciphertexts
+  </Step>
+  
+  <Step title="Submit to Duchy">
+    Send the encrypted sketch to a Duchy:
+    
+    - Sketch is stored encrypted in Duchy storage
+    - Multiple sketches may be required per publisher (for different requisitions)
+    - Publisher cannot decrypt or modify the sketch after submission
+  </Step>
+</Steps>
+
+### Encryption Details
+
+Publishers use **ElGamal encryption** over elliptic curves:
+
+- **Public key**: Composite key from all Duchies (received from Kingdom)
+- **Plaintext space**: Points on an elliptic curve (e.g., NIST P-256)
+- **Ciphertext**: Pair of curve points `(C₁, C₂)` per encrypted value
+- **Properties**: Additively homomorphic, semantically secure
+
+See [Protocol Cryptography](/concepts/protocol-cryptography) for cryptographic details.
+
+## Sketch Aggregation in the Protocol
+
+The MPC protocol performs several operations on encrypted sketches:
+
+### 1. Combining Sketches (Setup Phase)
+
+The aggregator Duchy combines encrypted sketches from all publishers:
+
+```
+Global CRV = Combine(Sketch₁, Sketch₂, ..., Sketchₙ)
+```
+
+**Process**:
+- For each register index `i`
+- Collect all (key, count) pairs across all publisher sketches
+- Combine into a single Combined Register Vector (CRV)
+- Add distributed differential privacy noise
+
+### 2. Shuffling (Execution Phase One)
+
+Each Duchy shuffles the CRV to hide the original structure:
+
+<Accordion title="Why Shuffle?">
+Shuffling prevents adversaries from:
+- Linking decrypted values back to specific publishers
+- Using register index patterns to infer user overlap
+- Correlating multiple measurements over time
+
+Each Duchy applies an independent random permutation, compounding the privacy protection.
+</Accordion>
+
+### 3. Join by Encrypted Keys (Execution Phase One)
+
+The aggregator identifies registers with the same encrypted key:
+
+- **Same key** = same user across different publishers
+- Counts from matching keys are combined
+- Result: One (flag, count) tuple per unique user
+
+**Cryptographic challenge**: Keys are encrypted, so comparison must be done without decryption!
+
+**Solution**: Uses **Same Key Aggregation** (SKA) with ElGamal properties:
+- Blind and re-randomize ciphertexts
+- Destroyed registers (non-matching keys) become identifiable after decryption
+- Preserved registers contain combined counts
+
+### 4. Frequency Aggregation (Execution Phase Two & Three)
+
+After partial decryption:
+
+- Flag values reveal which registers represent real users vs. noise
+- Count values are decrypted to reveal frequency information
+- A 2-D matrix aggregates counts: `matrix[frequency][index]`
+- Final reach and frequency statistics are estimated from the matrix
+
+## Privacy Properties of Sketches
+
+Sketches provide several privacy protections:
+
+### 1. One-Way Function
+
+User identifiers are hashed to produce keys. The hash function is **one-way**:
+
+✅ User ID → Key (easy)  
+❌ Key → User ID (computationally infeasible)
+
+Even after decryption, the system learns only that "some user with hash value X" appeared, not the user's actual identity.
+
+### 2. Aggregation
+
+Multiple users contribute to each register. Individual contributions are mixed together, making it impossible to isolate a single user's data.
+
+### 3. Noise
+
+Differential privacy noise is added at multiple levels:
+
+- Publisher-level: During sketch construction
+- MPC-level: During setup and aggregation phases
+- Result-level: In final reach/frequency estimates
+
+See [Differential Privacy](/concepts/differential-privacy) for details.
+
+### 4. Encryption
+
+Sketches remain encrypted throughout transmission and most of the computation. Only after all Duchies collaborate in the MPC protocol can values be decrypted.
+
+## Advanced: HyperLogLog-Style Estimation
+
+The sketch design borrows concepts from HyperLogLog (HLL):
+
+### HyperLogLog Basics
+
+HLL estimates cardinality by:
+1. Hashing elements and observing the position of the first '1' bit
+2. Maintaining maximum observed positions in multiple registers
+3. Computing harmonic mean across registers
+
+### Modifications for Privacy
+
+The Liquid Legions protocol modifies HLL:
+
+| HLL Feature | Liquid Legions Modification |
+|-------------|----------------------------|
+| Store max bit position | Store encrypted user key + count |
+| Deterministic merge | Secure multi-party join |
+| Direct cardinality | Estimate after decryption |
+| No frequency | Full frequency distribution |
+
+<Warning>
+**Important**: Standard HyperLogLog is NOT used directly because:
+- It doesn't support encryption of intermediate values
+- Merging encrypted HLL sketches would leak information
+- No support for frequency estimation
+- Difficult to add differential privacy without bias
+</Warning>
+
+## Reach-Only vs. Frequency Sketches
+
+The system supports two sketch variants:
+
+<Tabs>
+  <Tab title="Reach-Only">
+    **Use case**: Only measuring unique users (cardinality)
+    
+    **Optimizations**:
+    - No count values stored (only keys)
+    - Faster computation (fewer decryptions)
+    - Smaller bandwidth requirements
+    - Simpler protocol stages
+    
+    **Implementation**: `ReachOnlyLiquidLegionsSketchAggregationV2Protocol`
+  </Tab>
+  
+  <Tab title="Reach and Frequency">
+    **Use case**: Measuring both unique users and frequency distribution
+    
+    **Requirements**:
+    - Both key and count values per register
+    - Additional execution phase for frequency aggregation
+    - More noise required for privacy
+    - Larger sketch sizes
+    
+    **Implementation**: `LiquidLegionsSketchAggregationV2Protocol`
+  </Tab>
+</Tabs>
+
+## Implementation References
+
+Key files for sketch handling:
+
+- **Encryption utilities**: `src/main/cc/wfa/measurement/common/crypto/encryption_utility_helper.h`
+- **Register extraction**: Functions to parse key-count pairs from encrypted sketches
+- **Sketch parameters**: `src/main/proto/wfa/measurement/internal/duchy/protocol/liquid_legions_sketch_parameter.proto`
+- **Mill processing**: `src/main/kotlin/org/wfanet/measurement/duchy/deploy/common/job/mill/liquidlegionsv2/`
+
+## Research Papers
+
+The sketch design and aggregation techniques are described in:
+
+<CardGroup cols={2}>
+  <Card title="Privacy-Preserving Reach Estimation" href="https://research.google/pubs/pub49526/">
+    Complete system design including sketch construction
+  </Card>
+  
+  <Card title="Secure Cardinality Estimation" href="https://research.google/pubs/pub49177/">
+    Detailed cryptographic protocols for sketch aggregation
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Protocol Cryptography" href="/concepts/protocol-cryptography">
+    Learn the cryptographic operations performed on encrypted sketches
+  </Card>
+  
+  <Card title="Secure Computation" href="/concepts/secure-computation">
+    Understand how multiple Duchies process sketches without decryption
+  </Card>
+</CardGroup>

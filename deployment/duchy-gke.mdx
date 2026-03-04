@@ -1,0 +1,337 @@
+---
+title: "Deploy Duchy on GKE"
+description: "Deploy Halo Duchy components to Google Kubernetes Engine"
+---
+
+## Overview
+
+This guide walks you through deploying a Duchy to Google Kubernetes Engine (GKE). A Duchy is a computation node in the Halo Cross-Media Measurement System that participates in secure multi-party computation protocols.
+
+<Warning>
+Before deploying, you must register your Duchy with the Kingdom operator. See the registration section below.
+</Warning>
+
+## Prerequisites
+
+Complete the [deployment prerequisites](/deployment/prerequisites) including:
+
+- Bazel/Bazelisk installation
+- Google Cloud SDK configuration
+- kubectl installation
+- Terraform installation
+- Duchy registration with Kingdom (see below)
+
+## Duchy Registration
+
+Before deployment, register your Duchy with the Kingdom operator offline.
+
+<Steps>
+  <Step title="Prepare Registration Information">
+    Share the following with the Kingdom operator:
+    - Duchy name (unique string ID)
+    - CA (root) certificate
+    - Consent signaling (leaf) certificate
+  </Step>
+
+  <Step title="Receive Resource Names">
+    The Kingdom operator will register resources and share the resource names back to you.
+  </Step>
+</Steps>
+
+See [Creating Resources](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/docs/operations/creating-resources.md) for details.
+
+## Duchy Components
+
+For a Duchy named `worker1`, the deployment creates:
+
+<AccordionGroup>
+  <Accordion title="Services">
+    - `worker1-async-computation-control-server` (Cluster IP)
+    - `worker1-internal-api-server` (Cluster IP)
+    - `worker1-computation-control-server` (External LoadBalancer) - System API
+    - `worker1-requisition-fulfillment-server` (External LoadBalancer) - Public API
+  </Accordion>
+
+  <Accordion title="Deployments">
+    - `worker1-async-computation-control-server-deployment`
+    - `worker1-computation-control-server-deployment`
+    - `worker1-herald-daemon-deployment`
+    - `worker1-requisition-fulfillment-server-deployment`
+    - `worker1-spanner-computations-server-deployment`
+    - `worker1-mill-job-scheduler-deployment`
+  </Accordion>
+
+  <Accordion title="PodTemplates (Mill Jobs)">
+    - `worker1-llv2-mill` - Liquid Legions v2 protocol
+    - `worker1-hmss-mill` - Honest Majority Share Shuffle protocol
+  </Accordion>
+
+  <Accordion title="CronJobs">
+    - `worker1-computations-cleaner-cronjob`
+  </Accordion>
+
+  <Accordion title="RBAC">
+    - `worker1-mill-job-scheduler` (Role)
+    - `worker1-mill-job-scheduler-binding` (RoleBinding)
+  </Accordion>
+</AccordionGroup>
+
+## Deployment Steps
+
+<Steps>
+  <Step title="Provision Infrastructure with Terraform">
+    Use the example Terraform configuration:
+
+    ```bash
+    cd src/main/terraform/gcloud/examples/duchy
+    ```
+
+    Create a `backend.tf` file:
+
+    ```terraform backend.tf
+    terraform {
+      backend "gcs" {
+        bucket = "my-terraform-state-bucket"
+        prefix = "terraform/state/halo-cmms-worker1"
+      }
+    }
+    ```
+
+    Initialize and apply:
+
+    ```bash
+    terraform init
+    terraform apply -var="name=worker1" \
+      -var="storage_bucket_name=worker1-duchy"
+    ```
+
+    <Note>
+    The Terraform configuration creates:
+    - GKE cluster named `worker1-duchy`
+    - Cloud Spanner instance for computation storage
+    - Cloud Storage bucket for blob storage
+    - Two node pools: default (e2-standard-2, max 2 nodes) and spot (c2-standard-4, max 20 nodes)
+    - KMS key ring for encryption
+    </Note>
+  </Step>
+
+  <Step title="Get Cluster Credentials">
+    ```bash
+    gcloud container clusters get-credentials worker1-duchy --region=us-central1
+    ```
+  </Step>
+
+  <Step title="Build and Push Container Images (Optional)">
+    If not using pre-built release images:
+
+    ```bash
+    bazel run -c opt //src/main/docker:push_all_duchy_gke_images \
+      --define container_registry=gcr.io \
+      --define image_repo_prefix=halo-worker1-demo \
+      --define image_tag=build-0001
+    ```
+  </Step>
+
+  <Step title="Generate Kubernetes Kustomization">
+    ```bash
+    bazel build //src/main/k8s/dev:worker1_duchy.tar \
+      --define kingdom_public_api_target=v2alpha.kingdom.dev.halo-cmm.org:8443 \
+      --define google_cloud_project=halo-worker1-demo \
+      --define spanner_instance=halo-cmms \
+      --define duchy_cert_id=SVVse4xWHL0 \
+      --define duchy_public_api_address_name=worker1-duchy-v2alpha \
+      --define duchy_system_api_address_name=worker1-duchy-system-v1alpha \
+      --define duchy_storage_bucket=worker1-duchy \
+      --define container_registry=ghcr.io \
+      --define image_repo_prefix=world-federation-of-advertisers \
+      --define image_tag=0.5.2
+    ```
+
+    Extract to a secure location:
+
+    ```bash
+    mkdir -p ~/worker1-duchy-deployment
+    tar -xf bazel-bin/src/main/k8s/dev/worker1_duchy.tar -C ~/worker1-duchy-deployment
+    ```
+  </Step>
+
+  <Step title="Customize Kubernetes Secret">
+    Prepare files in `~/worker1-duchy-deployment/src/main/k8s/dev/worker1_duchy_secret/`:
+
+    **Required Files:**
+
+    1. **`all_root_certs.pem`** - TLS trusted CA store
+       - Root certificates for:
+         - All other Duchies
+         - EDPs that fulfill requisitions at this Duchy
+         - This Duchy's own CA
+
+       ```bash
+       cat *_root.pem > all_root_certs.pem
+       ```
+
+    2. **`worker1_tls.pem`** - Duchy's TLS certificate (PEM format)
+
+    3. **`worker1_tls.key`** - Private key for TLS certificate (PEM format)
+
+    4. **`worker1_cs_cert.der`** - Consent signaling certificate (DER format)
+
+    5. **`worker1_cs_private.der`** - Private key for consent signaling (DER format)
+
+    6. **`duchy_cert_config.textproto`** - Duchy certificate to ID mapping
+       - [Example](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/src/main/k8s/testing/secretfiles/duchy_cert_config.textproto)
+
+    7. **`xxx_protocols_setup_config.textproto`** - Protocol configuration
+       - Replace `xxx` with `aggregator` or `non_aggregator`
+       - Set the role appropriately
+       - [Aggregator Example](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/src/main/k8s/testing/secretfiles/aggregator_protocols_setup_config.textproto)
+
+    8. **`worker1_kek.tink`** - Key encryption key for HMSS protocol
+
+       Generate using Tinkey:
+       ```bash
+       tinkey create-keyset --key-template AES128_GCM \
+         --out-format binary --out worker1_kek.tink
+       ```
+
+    <Warning>
+    For testing only, you can use repository test files:
+    ```bash
+    bazel build //src/main/k8s/testing/secretfiles:archive
+    tar -xf bazel-bin/src/main/k8s/testing/secretfiles/archive.tar \
+      -C ~/worker1-duchy-deployment/src/main/k8s/dev/worker1_duchy_secret/
+    ```
+    **Never use test certificates in production!**
+    </Warning>
+  </Step>
+
+  <Step title="Customize Kubernetes ConfigMap">
+    Place `authority_key_identifier_to_principal_map.textproto` in:
+    `~/worker1-duchy-deployment/src/main/k8s/dev/config_files/`
+
+    See [Creating Resources](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/docs/operations/creating-resources.md).
+  </Step>
+
+  <Step title="Apply Kubernetes Kustomization">
+    ```bash
+    cd ~/worker1-duchy-deployment
+    kubectl apply -k src/main/k8s/dev/worker1_duchy
+    ```
+
+    Verify deployment:
+
+    ```bash
+    kubectl get deployments
+    kubectl get services
+    ```
+
+    Expected output:
+
+    ```
+    NAME                                                  READY   UP-TO-DATE   AVAILABLE
+    worker1-async-computation-control-server-deployment   1/1     1            1
+    worker1-computation-control-server-deployment         1/1     1            1
+    worker1-herald-daemon-deployment                      1/1     1            1
+    worker1-requisition-fulfillment-server-deployment     1/1     1            1
+    worker1-spanner-computations-server-deployment        1/1     1            1
+    ```
+
+    ```
+    NAME                                       TYPE           EXTERNAL-IP      PORT(S)
+    worker1-computation-control-server         LoadBalancer   34.134.198.198   8443:31962/TCP
+    worker1-requisition-fulfillment-server     LoadBalancer   35.202.201.111   8443:30684/TCP
+    ```
+  </Step>
+</Steps>
+
+## Certificate Requirements
+
+Use [Cloud Certificate Authority Service](https://console.cloud.google.com/security/cas/caPools) or your preferred CA.
+
+**TLS Certificate Requirements:**
+- Support both client and server TLS
+- Include in Subject Alternative Name (SAN):
+  - Hostnames for external IPs (e.g., `*.duchy.dev.halo-cmm.org`)
+  - `localhost`
+
+**Format Conversion:**
+
+Convert between PEM and DER formats using OpenSSL:
+
+```bash
+# Certificate: PEM to DER
+openssl x509 -in cert.pem -outform der -out cert.der
+
+# Private key: PEM to DER
+openssl pkcs8 -topk8 -in key.pem -outform der -out key.der -nocrypt
+```
+
+## Terraform Configuration
+
+Key variables for Duchy deployment:
+
+<CodeGroup>
+```terraform main.tf
+# Storage bucket for blob storage
+module "storage" {
+  source   = "../../modules/storage-bucket"
+  name     = var.storage_bucket_name
+  location = local.storage_bucket_location
+}
+
+# Default node pool for standard workloads
+module "default_node_pool" {
+  machine_type   = "e2-standard-2"
+  max_node_count = 2
+}
+
+# Spot node pool for computation mills
+module "spot_node_pool" {
+  machine_type   = "c2-standard-4"
+  max_node_count = 20
+  spot           = true
+}
+```
+
+```terraform variables.tf
+variable "name" {
+  description = "Name of the Duchy"
+  type        = string
+}
+
+variable "storage_bucket_name" {
+  description = "Cloud Storage bucket name"
+  type        = string
+}
+
+variable "spanner_instance_config" {
+  default = "regional-us-central1"
+}
+```
+</CodeGroup>
+
+## Testing the Deployment
+
+Verify the Duchy works correctly by completing a [multi-cluster correctness test](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/docs/gke/correctness-test.md) with the deployed Duchy and Kingdom.
+
+## Updating Configuration
+
+To update secrets or configuration:
+
+1. Modify files in the Kustomization directory
+2. Re-apply:
+
+```bash
+kubectl apply -k src/main/k8s/dev/worker1_duchy
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Operations Guide" icon="gears" href="/operations">
+    Learn about managing and operating the Duchy
+  </Card>
+  <Card title="Correctness Testing" icon="check" href="https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/docs/gke/correctness-test.md">
+    Run end-to-end tests
+  </Card>
+</CardGroup>

@@ -1,0 +1,354 @@
+---
+title: IntelliJ IDEA Setup
+description: Configure IntelliJ IDEA for Halo development with Bazel
+---
+
+IntelliJ IDEA is the recommended IDE for development work on the Halo measurement system. This guide walks you through setting up IntelliJ with the Bazel plugin for optimal development experience.
+
+## Requirements
+
+<CardGroup cols={2}>
+  <Card title="IntelliJ IDEA" icon="laptop-code">
+    Version 2024.1 or later (Community or Ultimate Edition)
+  </Card>
+  <Card title="Bazel Plugin" icon="puzzle-piece">
+    Official JetBrains Bazel plugin
+  </Card>
+</CardGroup>
+
+<Note>
+  The project is known to be compatible with IntelliJ IDEA 2024.1 Community Edition as of April 2024.
+</Note>
+
+## Installation
+
+<Steps>
+  <Step title="Install IntelliJ IDEA">
+    Download and install [IntelliJ IDEA](https://www.jetbrains.com/idea/download/) (Community Edition is sufficient).
+  </Step>
+  
+  <Step title="Install Bazel Plugin">
+    1. Open IntelliJ IDEA
+    2. Go to **Settings/Preferences** → **Plugins**
+    3. Search for "Bazel" in the Marketplace
+    4. Install the [Bazel plugin](https://plugins.jetbrains.com/plugin/8609-bazel)
+    5. Restart IntelliJ IDEA
+  </Step>
+  
+  <Step title="Install ktfmt Plugin (Optional)">
+    For automatic Kotlin formatting:
+    
+    1. Go to **Settings/Preferences** → **Plugins**
+    2. Search for "ktfmt"
+    3. Install the [ktfmt plugin](https://plugins.jetbrains.com/plugin/14912-ktfmt)
+    4. This will replace the default "Reformat Code" action
+  </Step>
+</Steps>
+
+## Project Setup
+
+<Steps>
+  <Step title="Import Bazel Project">
+    1. Open IntelliJ IDEA
+    2. Select **File** → **Import Bazel Project**
+    3. Choose the repository root as the workspace directory
+    4. Click **Next**
+  </Step>
+  
+  <Step title="Configure Project View">
+    IntelliJ will create a `.bazelproject` file. Ensure it includes the following configuration:
+    
+    ```
+    directories:
+      .
+
+    test_sources:
+      src/test/*
+
+    derive_targets_from_directories: true
+
+    additional_languages:
+      kotlin
+    ```
+  </Step>
+  
+  <Step title="Sync Project">
+    Click **Sync Project with BUILD Files** or press the sync button in the toolbar.
+  </Step>
+</Steps>
+
+<Tip>
+  The `kotlin` entry in `additional_languages` is **required** for proper code completion and navigation in Kotlin files.
+</Tip>
+
+## .bazelproject File
+
+The `.bazelproject` file configures how IntelliJ interacts with your Bazel workspace.
+
+### Basic Configuration
+
+```
+directories:
+  .
+
+test_sources:
+  src/test/*
+
+derive_targets_from_directories: true
+
+additional_languages:
+  kotlin
+```
+
+### Configuration Options
+
+| Option | Description |
+|--------|-------------|
+| `directories` | Directories to include in the project (`.` includes all) |
+| `test_sources` | Patterns for test source directories |
+| `derive_targets_from_directories` | Auto-discover Bazel targets from directories |
+| `additional_languages` | Languages requiring special support (e.g., kotlin) |
+
+### Advanced Configuration (Optional)
+
+```
+directories:
+  .
+  -bazel-container-output
+
+test_sources:
+  src/test/*
+
+derive_targets_from_directories: true
+
+additional_languages:
+  kotlin
+
+targets:
+  //src/main/...
+  //src/test/...
+
+import_run_configurations:
+  //src/main/kotlin/org/wfanet/measurement/...
+```
+
+<Note>
+  Exclude the `bazel-container-output` directory if you use containerized builds to avoid indexing generated files.
+</Note>
+
+## Code Navigation Features
+
+Once configured, IntelliJ provides powerful navigation capabilities:
+
+<CardGroup cols={2}>
+  <Card title="Go to Definition" icon="arrow-pointer">
+    **Ctrl+Click** (Cmd+Click on macOS) on symbols to jump to their definition
+  </Card>
+  
+  <Card title="Find Usages" icon="magnifying-glass">
+    **Alt+F7** to find all usages of a symbol across the project
+  </Card>
+  
+  <Card title="Navigate to Class" icon="file">
+    **Ctrl+N** (Cmd+O on macOS) to quickly find classes by name
+  </Card>
+  
+  <Card title="Navigate to File" icon="folder">
+    **Ctrl+Shift+N** (Cmd+Shift+O on macOS) to find any file
+  </Card>
+</CardGroup>
+
+## Running and Debugging
+
+### Run Bazel Targets
+
+<Steps>
+  <Step title="Create Run Configuration">
+    1. Right-click on a Bazel target in the project view
+    2. Select **Run '[target name]'**
+    3. IntelliJ automatically creates a run configuration
+  </Step>
+  
+  <Step title="Execute">
+    Click the **Run** button or press **Shift+F10**
+  </Step>
+</Steps>
+
+### Debug Bazel Targets
+
+<Steps>
+  <Step title="Set Breakpoints">
+    Click in the gutter next to line numbers to set breakpoints
+  </Step>
+  
+  <Step title="Start Debugging">
+    1. Right-click on a Bazel target
+    2. Select **Debug '[target name]'**
+    3. Or press **Shift+F9** with an existing run configuration
+  </Step>
+  
+  <Step title="Use Debug Controls">
+    - **F8** - Step over
+    - **F7** - Step into
+    - **Shift+F8** - Step out
+    - **F9** - Resume program
+  </Step>
+</Steps>
+
+## Testing in IntelliJ
+
+### Run Tests
+
+<CodeGroup>
+```text Single Test
+1. Right-click on a test class or method
+2. Select "Run 'TestName'"
+```
+
+```text All Tests in Package
+1. Right-click on a test package
+2. Select "Run Tests in 'package.name'"
+```
+
+```text From BUILD File
+1. Open BUILD.bazel file
+2. Click the run icon next to test targets
+```
+</CodeGroup>
+
+### View Test Results
+
+Test results appear in the **Run** tool window with:
+
+- ✅ Passed tests in green
+- ❌ Failed tests in red
+- Stack traces for failures
+- Console output from tests
+
+## Formatting and Code Style
+
+### Configure ktfmt
+
+If you installed the ktfmt plugin:
+
+<Steps>
+  <Step title="Enable ktfmt">
+    1. Go to **Settings/Preferences** → **Editor** → **ktfmt Settings**
+    2. Check **Enable ktfmt**
+    3. Select **Google (internal)** style
+  </Step>
+  
+  <Step title="Format on Save (Optional)">
+    1. Go to **Settings/Preferences** → **Tools** → **Actions on Save**
+    2. Check **Reformat code**
+  </Step>
+</Steps>
+
+### Manual Formatting
+
+Format code using:
+
+- **Ctrl+Alt+L** (Cmd+Option+L on macOS) - Format current file
+- **Ctrl+Alt+Shift+L** - Show reformat dialog with options
+
+<Tip>
+  Use ktfmt with `--google-style` to match project standards. The IntelliJ plugin automatically applies this style.
+</Tip>
+
+## Code Completion
+
+The Bazel plugin provides intelligent code completion for:
+
+- Kotlin/Java/C++ code
+- Protocol buffer definitions
+- Bazel BUILD files
+- Starlark (.bzl) files
+
+<Note>
+  If code completion isn't working, try syncing the project: **Bazel** → **Sync** → **Sync Project with BUILD Files**
+</Note>
+
+## Troubleshooting
+
+### Sync Issues
+
+If the project isn't syncing correctly:
+
+<Steps>
+  <Step title="Invalidate Caches">
+    **File** → **Invalidate Caches / Restart** → **Invalidate and Restart**
+  </Step>
+  
+  <Step title="Re-sync Project">
+    **Bazel** → **Sync** → **Sync Project with BUILD Files**
+  </Step>
+  
+  <Step title="Check .bazelproject">
+    Verify the `.bazelproject` file includes `additional_languages: kotlin`
+  </Step>
+</Steps>
+
+### Missing Dependencies
+
+If IntelliJ can't resolve dependencies:
+
+```bash
+# From terminal, ensure Bazel builds successfully:
+bazel build //src/main/...
+bazel build //src/test/...
+
+# Then re-sync in IntelliJ
+```
+
+### Performance Issues
+
+For large projects:
+
+1. Limit indexed directories in `.bazelproject`:
+   ```
+   directories:
+     src/main/kotlin
+     src/test/kotlin
+   ```
+
+2. Increase IntelliJ memory:
+   - **Help** → **Change Memory Settings**
+   - Set to at least 4096 MB
+
+## Alternative: Containerized Development
+
+If your host environment has glibc compatibility issues, you can run IntelliJ inside the build container:
+
+```bash
+# Run container with X11 forwarding
+docker run -it --rm \
+  -v "$PWD":/workspace \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -e DISPLAY=$DISPLAY \
+  ghcr.io/world-federation-of-advertisers/bazel \
+  /bin/bash
+
+# Install IntelliJ inside container
+# Then launch with X11 forwarding to your host display
+```
+
+<Warning>
+  This approach is more complex and should only be used if local development isn't possible.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Building" icon="hammer" href="./building">
+    Learn how to build the project
+  </Card>
+  <Card title="Testing" icon="flask" href="./testing">
+    Run and write tests
+  </Card>
+  <Card title="Dev Standards" icon="book" href="./standards">
+    Follow code review and commit standards
+  </Card>
+  <Card title="Contributing" icon="code-pull-request" href="./contributing">
+    Start contributing to the project
+  </Card>
+</CardGroup>

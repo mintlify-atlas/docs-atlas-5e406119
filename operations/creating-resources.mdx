@@ -1,0 +1,139 @@
+---
+title: Creating Resources
+description: Learn how to create measurements, data providers, and other resources in the Kingdom using the CreateResource tool
+---
+
+This guide covers how to create resources within a Kingdom, including data providers, model providers, and other entities that participate in the Halo Cross-Media Measurement System.
+
+<Note>
+This guide assumes familiarity with Kubernetes and how your Kingdom cluster is configured.
+</Note>
+
+## The CreateResource Tool
+
+Resources can be created using the [`CreateResource`](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/src/main/kotlin/org/wfanet/measurement/kingdom/deploy/tools/README.md) command-line tool.
+
+### Building the Tool
+
+If you don't have access to a pre-built version of the `CreateResource` tool, you can build it using Bazel:
+
+```bash
+bazel build //src/main/kotlin/org/wfanet/measurement/kingdom/deploy/tools:CreateResource
+```
+
+<Note>
+See the [Building](/development/building) guide for more information on system requirements.
+</Note>
+
+## mTLS Authentication for Resources
+
+Some resources also act as principals for authentication using mutual TLS (mTLS). These resource types include:
+
+- **DataProvider** - Organizations that provide event-level data
+- **ModelProvider** - Organizations that provide ML models
+- **Duchy** - Computation participants in the MPC protocol
+
+### Configuration Steps
+
+After creating a resource that uses mTLS authentication, you must complete two additional configuration steps:
+
+<Steps>
+
+<Step title="Update trusted certificate collection">
+
+The Kingdom's trusted certificate collection must include the root certificate for the new resource.
+
+If your Kingdom cluster follows the [`dev` environment](https://github.com/world-federation-of-advertisers/cross-media-measurement/tree/main/src/main/k8s/dev) configuration:
+
+1. Locate the `all_root_certs.pem` file in the `certs-and-configs` K8s Secret
+2. Add the new root certificate to this file
+3. Regenerate the Secret
+4. Update the K8s resource in your Kingdom cluster
+
+<Note>
+This step is also required for Measurement Consumer reporting tools that authenticate with the Kingdom using mTLS.
+</Note>
+
+</Step>
+
+<Step title="Update AKID to principal map">
+
+Map the client certificate's Authority Key Identifier (AKID) to the resource name.
+
+**For Duchy resources:**
+
+Update the [`DuchyCertConfig`](https://github.com/world-federation-of-advertisers/cross-media-measurement-api/blob/main/src/main/proto/wfa/measurement/config/duchy_cert_config.proto) file:
+
+- Located in `duchy_cert_config.textproto` in the `certs-and-configs` K8s Secret
+- Regenerate the secret after updating
+- Update the K8s resource in your Kingdom cluster
+
+**For other resources (DataProvider, ModelProvider):**
+
+Update the [`AuthorityKeyToPrincipalMap`](https://github.com/world-federation-of-advertisers/cross-media-measurement-api/blob/main/src/main/proto/wfa/measurement/config/authority_key_to_principal_map.proto) file:
+
+- Located in `authority_key_identifier_to_principal_map.textproto` in the `config-files` ConfigMap
+- Update the file within the ConfigMap
+- Restart the Kingdom deployments
+
+</Step>
+
+</Steps>
+
+## Configuration File Format
+
+The configuration files use Protocol Buffer text format. Each entry maps an AKID (as bytes) to a principal resource name.
+
+### Extracting the AKID
+
+Use the `openssl` command to extract the Authority Key Identifier from an X.509 certificate:
+
+```bash
+openssl x509 -noout -text -in src/main/k8s/testing/secretfiles/edp1_root.pem
+```
+
+### Example Configuration
+
+The AKID bytes are represented using the `\x` escape sequence followed by two-digit hex values:
+
+```prototext
+# proto-file: wfa/measurement/config/authority_key_to_principal_map.proto
+# proto-message: AuthorityKeyToPrincipalMap
+
+entries {
+  authority_key_identifier: "\x90\xC1\xD3\xBD\xE6\x74\x01\x55\xA7\xEF\xE6\x64\x72\xA6\x68\x9C\x41\x5B\x77\x04"
+  principal_resource_name: "dataProviders/OljiQHRz-E4"
+}
+
+entries {
+  authority_key_identifier: "\xF6\xED\xD1\x90\x2E\xF2\x04\x06\xEB\x16\xC4\x40\xCF\x69\x43\x86\x16\xCC\xAE\x08"
+  principal_resource_name: "dataProviders/Fegw_3Rz-2Y"
+}
+
+entries {
+  authority_key_identifier: "\xC8\x03\x73\x90\x9E\xBF\x33\x46\xEA\x94\x44\xC4\xAC\x77\x4D\x47\x67\xA1\x81\x94"
+  principal_resource_name: "dataProviders/aeULv4uMBDg"
+}
+```
+
+## Best Practices
+
+<Warning>
+**Security Considerations**
+
+- Keep private keys secure and never commit them to version control
+- Use dedicated Certificate Authority services (Google Cloud CA, AWS Private CA) in production
+- Avoid using OpenSSL as a CA in production environments
+- Regularly rotate certificates to limit compromise risk
+</Warning>
+
+<Note>
+**Kubernetes Secrets Management**
+
+When updating Secrets and ConfigMaps:
+
+1. Make changes to your local configuration files
+2. Regenerate the K8s resources
+3. Apply using `kubectl apply`
+4. Restart affected deployments if needed
+</Note>

@@ -1,0 +1,365 @@
+---
+title: Development Standards
+description: Code review, commit message format, and development best practices
+---
+
+This guide outlines the standards and practices for developers contributing to the Halo measurement system.
+
+## Commit Message Format
+
+Commit messages must strictly adhere to the [Conventional Commits](https://www.conventionalcommits.org/) specification to enable tooling to parse them.
+
+### Commit Types
+
+The following types are adopted from the [Angular Commit Message Guidelines](https://github.com/angular/angular/blob/main/contributing-docs/commit-message-guidelines.md#type):
+
+| Type | Description |
+|------|-------------|
+| **build** | Changes affecting the build system or external dependencies |
+| **ci** | Changes to CI configuration files and scripts |
+| **docs** | Documentation only changes |
+| **feat** | A new feature |
+| **fix** | A bug fix |
+| **perf** | A code change that improves performance |
+| **refactor** | A code change with no externally visible changes |
+| **test** | Adding missing tests or correcting existing tests |
+
+### Format Structure
+
+<CodeGroup>
+```text Basic Format
+<type>(<scope>): <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+```text Breaking Change
+<type>!(<scope>): <description>
+
+BREAKING-CHANGE: Description of the breaking change
+```
+
+```text With Issue Reference
+feat(kingdom): Add new measurement protocol
+
+Implements the new protocol for improved accuracy.
+
+Issue: #123
+```
+</CodeGroup>
+
+### Commit Message Rules
+
+<Steps>
+  <Step title="Write imperative descriptions">
+    The description should be a complete imperative sentence:
+    
+    - ✅ "Delete the Foo method from the Bar service"
+    - ❌ "Deletes the Foo method from the Bar service"
+  </Step>
+  
+  <Step title="Use breaking change indicator">
+    The `!` indicator **must** be used for breaking changes:
+    
+    ```
+    feat!: Change API authentication method
+    
+    BREAKING-CHANGE: Old API keys will no longer work
+    ```
+  </Step>
+  
+  <Step title="Add Git trailers">
+    Format footers as valid [Git trailers](https://git-scm.com/docs/git-interpret-trailers):
+    
+    ```
+    Issue: org/repo#123
+    RELNOTES: New feature for improved performance
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  Use `BREAKING-CHANGE` (with hyphen) instead of `BREAKING CHANGE` to ensure it's a valid Git trailer.
+</Note>
+
+### Additional Trailers
+
+#### Issue Trailer
+
+Every significant PR should reference at least one GitHub issue:
+
+```
+Issue: world-federation-of-advertisers/cross-media-measurement#456
+```
+
+Use the [short link format](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/autolinked-references-and-urls#issues-and-pull-requests), not full URLs.
+
+#### RELNOTES Trailer
+
+For release note text that isn't a breaking change:
+
+```
+RELNOTES: Improved query performance for large datasets
+```
+
+### Pull Request Format
+
+The PR description populates the commit message when merged:
+
+- **PR title** → First line of commit message
+- **PR description body** → Body and footers of commit message
+
+<Warning>
+  Remove any line wrapping that GitHub introduces into the PR title and commit message to ensure parseability.
+</Warning>
+
+## Code Review Process
+
+### Use Reviewable
+
+All code reviews are conducted using [Reviewable.io](https://reviewable.io). Read the [Reviewable user guide](https://docs.reviewable.io/introduction.html), especially the section on [Code review discussions](https://docs.reviewable.io/discussions.html).
+
+<Note>
+  While reviews happen in Reviewable, PR merging is still done through the GitHub UI.
+</Note>
+
+### Review Workflow
+
+<Steps>
+  <Step title="Reviewer leaves comments">
+    The reviewer adds comments in either Blocking or non-Blocking disposition.
+  </Step>
+  
+  <Step title="Author responds">
+    The author:
+    - Pushes code changes
+    - Responds to comments
+    - Marks comments as "Satisfied" when addressed
+  </Step>
+  
+  <Step title="Iterate until approval">
+    Repeat steps 1-2 until the reviewer approves. The Publish button automatically shifts to "Publish & Approve" once all blocking comments are satisfied.
+  </Step>
+</Steps>
+
+#### Comment Dispositions
+
+- **Blocking** - Must be resolved before approval
+- **Non-blocking** - Suggestions that don't block approval
+- **Satisfied** - Author has addressed the comment
+- **Working** - Author is still working on a fix (use rarely)
+
+<Tip>
+  Authors should only publish comments when there's an action for the reviewer to take. Wait until you've pushed the fix before replying.
+</Tip>
+
+### Review Code Quickly
+
+Prioritize keeping other engineers unblocked:
+
+<CardGroup cols={2}>
+  <Card title="Treat as Urgent" icon="clock">
+    Code review is an urgent asynchronous task. Prioritize it over design docs, coding, and addressing your own PR comments.
+  </Card>
+  
+  <Card title="Avoid Needless Blocking" icon="unlock">
+    - Suggest adding TODOs instead of fixing non-pressing issues
+    - Preemptively approve straightforward fixes
+    - Link to citations for style/readability issues
+  </Card>
+</CardGroup>
+
+<Warning>
+  Aim to merge PRs within 48 hours to minimize merge conflicts, reduce context switching, and simplify dependent branch management.
+</Warning>
+
+## Code Authorship
+
+### Review Your Own Code First
+
+Before adding reviewers:
+
+<Steps>
+  <Step title="Write detailed PR description">
+    Include references to related GitHub issues
+  </Step>
+  
+  <Step title="Check for issues">
+    - Typos
+    - Style guide violations
+    - Insufficient documentation
+  </Step>
+  
+  <Step title="Mark temporary changes">
+    Use `DO_NOT_SUBMIT` comments for changes that shouldn't be merged. An automated check will block the PR.
+  </Step>
+</Steps>
+
+### Code Style Guidelines
+
+The following language-specific guidelines apply to all contributions.
+
+## Pull Requests, Issues & Milestones
+
+### Pull Requests
+
+- Every PR should be associated with an existing Issue
+- If associated with an issue, the PR **must** have an `Issue` trailer in the commit message
+
+### Issues
+
+<CardGroup cols={3}>
+  <Card title="Type" icon="tag">
+    Each issue **must** have a type (e.g., Bug, Feature request)
+  </Card>
+  
+  <Card title="Title" icon="heading">
+    Titles must be self-contained and meaningful without parent context
+  </Card>
+  
+  <Card title="Dependencies" icon="link">
+    Declare blocking relationships in the issue's Relationships field
+  </Card>
+</CardGroup>
+
+<Tip>
+  Use the appropriate issue template when creating an issue. Fall back to the 'blank' template if no special template applies.
+</Tip>
+
+### Milestones
+
+- Only **issues** (not PRs) should be linked to milestones
+- Process issues (not related to `src` files) have type "Process" and aren't associated with milestones
+
+## Code Style
+
+Detailed code style guidelines are organized by language and topic.
+
+### General Principles
+
+<CardGroup cols={2}>
+  <Card title="Thorough Testing" icon="vial">
+    - Test the contract (public API), not implementation
+    - Use appropriate test doubles (fakes, mocks, stubs)
+    - Prefer more, smaller test cases
+  </Card>
+  
+  <Card title="Code Quality" icon="star">
+    - Autoformat and lint all code
+    - Keep code free of compiler warnings
+    - Limit unnecessary third-party dependencies
+  </Card>
+</CardGroup>
+
+### Handling Compiler Warnings
+
+<Steps>
+  <Step title="Fix or work around">
+    Make a strong attempt to address the warning or find an alternative approach.
+  </Step>
+  
+  <Step title="Suppress if false alarm">
+    If the code is safe and correct, suppress the warning with a comment explaining why.
+  </Step>
+  
+  <Step title="Add TODO if needed">
+    For warnings that can't be addressed yet (e.g., deprecated symbols still in use), add a TODO. **Do not** suppress these warnings.
+  </Step>
+</Steps>
+
+### Project Conventions
+
+- Tests go in `src/test/` tree
+- Test infrastructure used by multiple packages goes in `testing` subpackages in `src/main/` (marked `testonly`)
+- Public service APIs follow [AIPs](https://aip.dev/) with noted exceptions
+- Database access is restricted to internal API servers
+- Database internal IDs must not be exposed outside internal APIs
+- Protobuf messages for database rows end in `Details`
+
+### Language-Specific Guidelines
+
+<AccordionGroup>
+  <Accordion title="Kotlin">
+    - Follow [Google Android Kotlin style guide](https://developer.android.com/kotlin/style-guide)
+    - **Exception**: Use 2 spaces instead of 4 for indentation
+    - Use [Truth](https://truth.dev/) for test assertions
+    - Use [ProtoTruth](https://truth.dev/protobufs) for protobuf assertions
+    - Prefer Kotlin DSL builders for protocol buffers
+    - Specify types explicitly except when obvious
+    - Use companion objects for constants
+    - Catch `StatusException` from RPCs immediately at call site
+    
+    **Formatting**: Use [`ktfmt`](https://github.com/facebookincubator/ktfmt) with `--google-style`
+  </Accordion>
+  
+  <Accordion title="C++">
+    - Follow [Google C++ Style Guide](https://google.github.io/styleguide/cppguide.html)
+    - Follow [Abseil's Tips of the Week](http://abseil.io/tips)
+    - Don't rely on transitive includes
+    - Use [`include-what-you-use`](https://include-what-you-use.org) tool
+    
+    **Formatting**: Use [`clang-format`](https://clang.llvm.org/docs/ClangFormat.html) with `--style=Google`
+  </Accordion>
+  
+  <Accordion title="Bazel BUILD and Starlark">
+    - Follow Bazel [BUILD style guide](https://docs.bazel.build/versions/master/skylark/build-style.html)
+    - Follow [.bzl style guide](https://docs.bazel.build/versions/master/skylark/bzl-style.html)
+    - Don't rely on transitive dependencies
+    - Include all directly referenced dependencies in `deps`
+    
+    **Formatting**: Use [`Buildifier`](https://github.com/bazelbuild/buildtools/tree/master/buildifier)
+  </Accordion>
+  
+  <Accordion title="Protocol Buffers">
+    Follow [Protocol Buffers style guide](https://developers.google.com/protocol-buffers/docs/style)
+  </Accordion>
+  
+  <Accordion title="Markdown">
+    - Follow [Google Markdown Style Guide](https://google.github.io/styleguide/docguide/style.html)
+    - Maintain compatibility with [GitHub Flavored Markdown](https://github.github.com/gfm/) and [Gitiles](https://gerrit.googlesource.com/gitiles/+/HEAD/Documentation/markdown.md)
+  </Accordion>
+</AccordionGroup>
+
+## TODOs
+
+Use TODO comments to point out desired improvements. Each TODO should be actionable, explaining how it can be resolved.
+
+### Format
+
+```
+TODO(<context>): <comment>
+```
+
+The context indicates the person or tracked issue with the most information (not an assignee).
+
+<CodeGroup>
+```kotlin GitHub Issue
+// TODO(world-federation-of-advertisers/cross-media-measurement#123): 
+//   Switch to new API after migration
+```
+
+```kotlin GitHub User
+// TODO(@username): Refactor after dependency upgrade
+```
+
+```kotlin Short Reference
+// TODO(org/repo#456): Update when feature is available
+```
+</CodeGroup>
+
+<Tip>
+  Prefer referencing issues over people whenever possible, as well-written issues provide permanent history and additional context.
+</Tip>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Testing Guide" icon="flask" href="./testing">
+    Learn about testing procedures
+  </Card>
+  <Card title="Contributing" icon="code-pull-request" href="./contributing">
+    How to contribute to the project
+  </Card>
+</CardGroup>

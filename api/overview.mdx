@@ -1,0 +1,204 @@
+---
+title: API Overview
+description: Overview of the Halo Cross-Media Measurement System APIs
+---
+
+The Halo Cross-Media Measurement System provides a comprehensive set of gRPC and REST APIs for privacy-preserving cross-media measurement. The system is designed around a federated architecture where multiple parties collaborate to compute aggregate metrics without exposing raw user-level data.
+
+## API Architecture
+
+The Halo system consists of three main API layers:
+
+### Public APIs (v2alpha)
+
+**Reporting API** - High-level reporting interface for measurement consumers
+- Create and manage reports with metrics and aggregations
+- Define reporting sets and metric calculation specifications
+- Schedule automated report generation
+- Query event groups and apply filters
+
+**Access Control API (v1alpha)** - Role-based access control
+- Manage principals (users and TLS clients)
+- Define policies and permissions
+- Check authorization for operations
+
+### System APIs (v1alpha)
+
+Internal system APIs for communication between Kingdom and Duchies:
+
+- **Computation Control** - Coordinate MPC computations across duchies
+- **Requisition Fulfillment** - Track requisition state and data transfer
+- **Computations Service** - Stream and manage computation lifecycle
+- **Computation Participants** - Manage duchy participation in computations
+
+### Internal APIs
+
+Implementation-specific internal APIs for backend services (not documented here).
+
+## API Versioning
+
+All APIs use explicit versioning in the package namespace:
+
+- `wfa.measurement.reporting.v2alpha` - Reporting APIs
+- `wfa.measurement.access.v1alpha` - Access control APIs
+- `wfa.measurement.system.v1alpha` - System APIs
+
+The `alpha` designation indicates APIs that may evolve based on feedback.
+
+## Authentication and Authorization
+
+### Authentication Methods
+
+The Halo system supports two primary authentication methods:
+
+**OAuth 2.0** - For user-based access
+- OpenID Connect integration
+- JWT token validation
+- Issuer and subject identification
+
+**Mutual TLS (mTLS)** - For service-to-service communication
+- X.509 certificate-based authentication
+- Authority Key Identifier (AKID) validation
+- Certificate pinning support
+
+### Authorization Model
+
+Access control uses a Role-Based Access Control (RBAC) model:
+
+1. **Principals** - Authenticated entities (users or TLS clients)
+2. **Roles** - Named sets of permissions
+3. **Policies** - Bindings of roles to principals for specific resources
+4. **Permissions** - Granular access rights on resource types
+
+See the [Access Control APIs](/api/access/permissions) for details.
+
+## Protocol Support
+
+### gRPC
+
+All APIs are defined using Protocol Buffers (proto3) and exposed via gRPC:
+
+```protobuf
+service Reports {
+  rpc CreateReport(CreateReportRequest) returns (Report);
+  rpc GetReport(GetReportRequest) returns (Report);
+  rpc ListReports(ListReportsRequest) returns (ListReportsResponse);
+}
+```
+
+**Features:**
+- Strongly-typed schemas
+- Efficient binary serialization
+- Streaming RPC support
+- Built-in deadline and cancellation
+
+### REST/HTTP
+
+Public APIs also support REST via gRPC-Gateway:
+
+```http
+POST /v2alpha/measurementConsumers/{measurement_consumer}/reports
+GET /v2alpha/measurementConsumers/{measurement_consumer}/reports/{report}
+```
+
+**HTTP Annotations:**
+- RESTful resource paths
+- Standard HTTP methods (GET, POST, DELETE)
+- JSON request/response encoding
+
+## Resource Naming
+
+All resources follow the [AIP-122](https://google.aip.dev/122) resource naming convention:
+
+**Format:** `{collection}/{id}`
+
+**Examples:**
+- `measurementConsumers/123/reports/456`
+- `measurementConsumers/123/metrics/789`
+- `computations/abc123/requisitions/def456`
+
+**Fully-Qualified Names:**
+- Use full resource paths in API requests
+- Resource references use `resource_reference` annotations
+- Parent-child relationships encoded in path hierarchy
+
+## Common Patterns
+
+### Pagination
+
+List methods support pagination using page tokens:
+
+<ParamField path="page_size" type="int32">
+  Maximum number of resources to return (default: 50, max: 1000)
+</ParamField>
+
+<ParamField path="page_token" type="string">
+  Token from previous response to retrieve next page
+</ParamField>
+
+### Filtering
+
+Many list operations support filtering:
+
+**CEL-based filters** (Common Expression Language)
+```
+filter: "state = 'SUCCEEDED' && create_time > timestamp('2024-01-01T00:00:00Z')"
+```
+
+**Structured filters** - Strongly-typed filter messages
+```protobuf
+message Filter {
+  repeated string cmms_data_provider_in = 1;
+  google.protobuf.Timestamp data_availability_start_time_on_or_after = 2;
+}
+```
+
+### Long-Running Operations
+
+Computations and reports are asynchronous:
+
+1. Create resource - returns immediately in `RUNNING` state
+2. Poll resource - check `state` field periodically
+3. Terminal states - `SUCCEEDED`, `FAILED`, or `CANCELLED`
+
+### Idempotency
+
+Create operations support idempotency tokens:
+
+<ParamField path="request_id" type="string">
+  Unique identifier (UUID recommended) for idempotent request processing
+</ParamField>
+
+## Error Handling
+
+APIs use standard gRPC status codes:
+
+| Code | Description | Example |
+|------|-------------|----------|
+| `OK` | Success | Operation completed |
+| `INVALID_ARGUMENT` | Invalid parameter | Malformed resource name |
+| `NOT_FOUND` | Resource not found | Report ID does not exist |
+| `PERMISSION_DENIED` | Authorization failed | Insufficient permissions |
+| `ABORTED` | Concurrent modification | ETag mismatch |
+| `RESOURCE_EXHAUSTED` | Rate limit exceeded | Too many requests |
+| `FAILED_PRECONDITION` | Invalid state | Cannot modify terminal resource |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Reporting APIs" icon="chart-line" href="/api/reporting">
+    Generate cross-media measurement reports
+  </Card>
+  
+  <Card title="Access Control" icon="shield-halved" href="/api/access/permissions">
+    Manage permissions and policies
+  </Card>
+  
+  <Card title="System APIs" icon="server" href="/api/system/computation-control">
+    Internal system coordination
+  </Card>
+  
+  <Card title="Data Provider APIs" icon="database" href="/api/data-provider">
+    Fulfill requisitions and provide data
+  </Card>
+</CardGroup>

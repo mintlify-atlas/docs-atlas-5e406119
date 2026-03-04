@@ -1,0 +1,326 @@
+---
+title: "Deploy Kingdom on GKE"
+description: "Deploy Halo Kingdom components to Google Kubernetes Engine"
+---
+
+## Overview
+
+This guide walks you through deploying the Kingdom to Google Kubernetes Engine (GKE). The `dev` environment configuration can be used as a basis for your deployment.
+
+<Warning>
+This guide provides one approach to deployment. Adjust quotas, names, and resource configurations based on your specific requirements.
+</Warning>
+
+## Prerequisites
+
+Before starting, complete the [deployment prerequisites](/deployment/prerequisites) including:
+
+- Bazel/Bazelisk installation
+- Google Cloud SDK configuration
+- kubectl installation
+- Terraform installation
+
+## Kingdom Components
+
+The Kingdom deployment creates the following Kubernetes resources:
+
+<AccordionGroup>
+  <Accordion title="Services">
+    - `gcp-kingdom-data-server` (Cluster IP)
+    - `system-api-server` (External LoadBalancer)
+    - `v2alpha-public-api-server` (External LoadBalancer)
+  </Accordion>
+
+  <Accordion title="Deployments">
+    - `gcp-kingdom-data-server-deployment`
+    - `system-api-server-deployment`
+    - `v2alpha-public-api-server-deployment`
+  </Accordion>
+
+  <Accordion title="CronJobs">
+    - `completed-measurements-deletion-cronjob`
+    - `pending-measurements-cancellation-cronjob`
+    - `exchanges-deletion-cronjob`
+  </Accordion>
+
+  <Accordion title="Secrets & ConfigMaps">
+    - `certs-and-configs-<hash>` (Secret)
+    - `config-files-<hash>` (ConfigMap)
+  </Accordion>
+
+  <Accordion title="Network Policies">
+    - `default-deny-network-policy`
+    - `kube-dns-network-policy`
+    - `gke-network-policy`
+    - API server and data server network policies
+  </Accordion>
+</AccordionGroup>
+
+## Deployment Steps
+
+<Steps>
+  <Step title="Provision Infrastructure with Terraform">
+    Use the example Terraform configuration to provision Google Cloud resources:
+
+    ```bash
+    cd src/main/terraform/gcloud/examples/kingdom
+    ```
+
+    Create a `backend.tf` file for state management:
+
+    ```terraform backend.tf
+    terraform {
+      backend "gcs" {
+        bucket = "my-terraform-state-bucket"
+        prefix = "terraform/state/halo-cmms-kingdom"
+      }
+    }
+    ```
+
+    Initialize and apply the Terraform configuration:
+
+    ```bash
+    terraform init
+    terraform plan
+    terraform apply
+    ```
+
+    <Note>
+    The Terraform configuration creates:
+    - GKE cluster named `kingdom`
+    - Cloud Spanner instance (1000 processing units, Enterprise edition)
+    - KMS key ring for encryption
+    - External IP addresses for API servers
+    </Note>
+  </Step>
+
+  <Step title="Get Cluster Credentials">
+    Configure kubectl to access your new cluster:
+
+    ```bash
+    gcloud container clusters get-credentials kingdom --region=us-central1
+    ```
+  </Step>
+
+  <Step title="Build and Push Container Images (Optional)">
+    If not using [pre-built release images](https://github.com/orgs/world-federation-of-advertisers/packages?repo_name=cross-media-measurement), build and push images from source:
+
+    ```bash
+    bazel run -c opt //src/main/docker:push_all_kingdom_gke_images \
+      --define container_registry=gcr.io \
+      --define image_repo_prefix=halo-kingdom-demo \
+      --define image_tag=build-0001
+    ```
+
+    <Accordion title="Using Hybrid Development">
+    For containerized builds, replace commands:
+    - `bazel build` → `tools/bazel-container build`
+    - `bazel run` → `tools/bazel-container-run`
+    </Accordion>
+  </Step>
+
+  <Step title="Generate Kubernetes Kustomization">
+    Generate the K8s configuration using Bazel:
+
+    ```bash
+    bazel build //src/main/k8s/dev:kingdom.tar \
+      --define google_cloud_project=halo-kingdom-demo \
+      --define spanner_instance=halo-cmms \
+      --define kingdom_public_api_address_name=kingdom-v2alpha \
+      --define kingdom_system_api_address_name=kingdom-system-v1alpha \
+      --define container_registry=ghcr.io \
+      --define image_repo_prefix=world-federation-of-advertisers \
+      --define image_tag=0.5.2
+    ```
+
+    Extract the generated archive to a secure location:
+
+    ```bash
+    mkdir -p ~/kingdom-deployment
+    tar -xf bazel-bin/src/main/k8s/dev/kingdom.tar -C ~/kingdom-deployment
+    ```
+
+    <Warning>
+    Store this directory securely as it will contain sensitive information. Persist it for applying updates.
+    </Warning>
+  </Step>
+
+  <Step title="Customize Kubernetes Secret">
+    Prepare certificate and configuration files in `~/kingdom-deployment/src/main/k8s/dev/kingdom_secret/`:
+
+    **Required Files:**
+
+    1. **`all_root_certs.pem`** - TLS trusted root CA store
+       - Concatenation of root certificates for all entities:
+         - All Duchies
+         - All EDPs
+         - All MC reporting tools
+         - Kingdom itself
+
+       ```bash
+       cat *_root.pem > all_root_certs.pem
+       ```
+
+    2. **`kingdom_root.pem`** - Kingdom's root CA certificate
+
+    3. **`kingdom_tls.pem`** - Kingdom's TLS certificate
+
+    4. **`kingdom_tls.key`** - Private key for Kingdom's TLS certificate
+
+    5. **`duchy_cert_config.textproto`** - Duchy certificate to ID mapping
+       - [Example](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/src/main/k8s/testing/secretfiles/duchy_cert_config.textproto)
+
+    6. **`duchy_id_config.textproto`** - External to internal Duchy ID mapping
+       - [Example](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/src/main/k8s/testing/secretfiles/duchy_id_config.textproto)
+
+    7. **Protocol Configurations:**
+       - `llv2_protocol_config_config.textproto` - Liquid Legions v2
+       - `ro_llv2_protocol_config_config.textproto` - Reach-Only Liquid Legions v2
+       - `hmss_protocol_config_config.textproto` - Honest Majority Share Shuffle
+
+    <Warning>
+    **Never use testing secret files in production!** The repository contains test certificates that must only be used for testing.
+    </Warning>
+
+    <Accordion title="For Testing Only">
+    ```bash
+    bazel build //src/main/k8s/testing/secretfiles:archive
+    tar -xf bazel-bin/src/main/k8s/testing/secretfiles/archive.tar \
+      -C ~/kingdom-deployment/src/main/k8s/dev/kingdom_secret/
+    ```
+    </Accordion>
+  </Step>
+
+  <Step title="Customize Kubernetes ConfigMap">
+    Place configuration files in `~/kingdom-deployment/src/main/k8s/dev/config_files/`:
+
+    - **`authority_key_identifier_to_principal_map.textproto`** - Principal mapping configuration
+    - **`known_event_group_metadata_type_set.pb`** - Protobuf FileDescriptorSet for EventGroup metadata types
+
+    See [Creating Resources](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/docs/operations/creating-resources.md) for details.
+  </Step>
+
+  <Step title="Apply Kubernetes Kustomization">
+    Deploy all Kingdom components:
+
+    ```bash
+    cd ~/kingdom-deployment
+    kubectl apply -k src/main/k8s/dev/kingdom
+    ```
+
+    Verify deployment:
+
+    ```bash
+    kubectl get deployments
+    kubectl get services
+    ```
+
+    Expected output:
+
+    ```
+    NAME                                   READY   UP-TO-DATE   AVAILABLE   AGE
+    gcp-kingdom-data-server-deployment     1/1     1            1           1m
+    system-api-server-deployment           1/1     1            1           1m
+    v2alpha-public-api-server-deployment   1/1     1            1           1m
+    ```
+
+    ```
+    NAME                        TYPE           CLUSTER-IP     EXTERNAL-IP    PORT(S)
+    gcp-kingdom-data-server     ClusterIP      10.3.245.210   <none>         8443/TCP
+    system-api-server           LoadBalancer   10.3.248.13    34.67.15.39    8443:30347/TCP
+    v2alpha-public-api-server   LoadBalancer   10.3.255.191   34.132.87.22   8443:31300/TCP
+    ```
+  </Step>
+
+  <Step title="Configure DNS Records">
+    Add `A` records in your DNS configuration mapping domain names to the external IPs:
+
+    Example for `halo-cmm.org`:
+    - `v2alpha.kingdom.dev.halo-cmm.org` → Public API external IP
+    - `v1alpha.system.kingdom.dev.halo-cmm.org` → System API external IP
+
+    These hostnames enable Duchies, EDPs, and model providers to access Kingdom services.
+  </Step>
+</Steps>
+
+## Certificate Requirements
+
+Generate certificates using [Cloud Certificate Authority Service](https://console.cloud.google.com/security/cas/caPools) or your preferred CA.
+
+**Requirements:**
+- Support both client and server TLS
+- Include DNS hostnames in Subject Alternative Name (SAN):
+  - `*.kingdom.dev.halo-cmm.org` (or your domain)
+  - `localhost`
+
+**Encryption Keys:**
+
+Generate using [Tinkey](https://github.com/google/tink/blob/master/docs/TINKEY.md):
+
+```bash
+tinkey create-keyset --key-template AES128_GCM --out-format binary --out key.tink
+```
+
+## Updating Configuration
+
+To update secrets or configuration:
+
+1. Modify files in the Kustomization directory
+2. Re-apply the configuration:
+
+```bash
+kubectl apply -k src/main/k8s/dev/kingdom
+```
+
+## Testing the Deployment
+
+Verify the Kingdom is working properly by:
+
+1. Running [ResourceSetup](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/docs/operations/creating-resources.md) to create resources
+2. Completing a [multi-cluster correctness test](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/docs/gke/correctness-test.md)
+
+## Terraform Configuration Reference
+
+<CodeGroup>
+```terraform main.tf
+# Key resources created
+resource "google_spanner_instance" "spanner_instance" {
+  name             = "halo-cmms"
+  config           = "regional-us-central1"
+  processing_units = 1000
+  edition          = "ENTERPRISE"
+}
+
+module "kingdom_cluster" {
+  source          = "../../modules/cluster"
+  name            = "kingdom"
+  machine_type    = "e2-custom-2-4096"
+  max_node_count  = 2
+}
+```
+
+```terraform variables.tf
+variable "cluster_name" {
+  default = "kingdom"
+}
+
+variable "spanner_instance_name" {
+  default = "halo-cmms"
+}
+
+variable "cluster_release_channel" {
+  default = "REGULAR"
+}
+```
+</CodeGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Deploy Duchy" icon="server" href="/deployment/duchy-gke">
+    Deploy Duchy components to complete the system
+  </Card>
+  <Card title="Operations Guide" icon="gears" href="/operations">
+    Learn about creating resources and system operations
+  </Card>
+</CardGroup>

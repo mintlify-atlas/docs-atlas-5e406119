@@ -1,0 +1,318 @@
+---
+title: Duchy Overview
+description: Understanding Duchies in the Halo Cross-Media Measurement System
+---
+
+A **Duchy** is a computational node in the Halo system that performs secure multi-party computation (MPC) to compute aggregate measurements while preserving individual user privacy. Multiple duchies collaborate to execute cryptographic protocols without any single party seeing raw user data.
+
+## Role in the System
+
+Duchies are the **computation engines** that:
+
+- **Execute MPC Protocols**: Run cryptographic computation protocols (Liquid Legions V2, HMSS, etc.)
+- **Process Encrypted Data**: Work with encrypted sketch data without accessing plaintext
+- **Coordinate with Peers**: Communicate with other duchies to advance multi-party computations
+- **Fulfill Requisitions**: Obtain encrypted event data from Event Data Providers
+- **Preserve Privacy**: Ensure no single duchy can reconstruct individual user information
+
+<Note>
+**Security Model**: The Halo system requires at least 3 duchies for Liquid Legions V2 protocol. As long as at least one duchy is honest, user privacy is guaranteed even if others are compromised.
+</Note>
+
+## Architecture
+
+Each duchy is an independent deployment with its own storage, computation workers, and API servers.
+
+<CardGroup cols={3}>
+  <Card title="Storage Layer" icon="database">
+    Spanner for computation state and blob storage for encrypted data
+  </Card>
+  <Card title="Service Layer" icon="server">
+    API servers for coordination and requisition fulfillment
+  </Card>
+  <Card title="Computation Layer" icon="microchip">
+    Mill workers that execute cryptographic protocols
+  </Card>
+</CardGroup>
+
+### Duchy Components
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  Kingdom                              │
+│          (Orchestration & State)                      │
+└─────────────────┬───────────────────────────────────┘
+                 │
+                 ▼
+    ┌──────────────────────────────────────────────────┐
+    │                   DUCHY                            │
+    │                                                    │
+    │  ┌──────────────────────────────────────────┐  │
+    │  │          Herald Daemon                     │  │
+    │  │  (Claims work from Kingdom)              │  │
+    │  └─────────────────┬──────────────────────────┘  │
+    │                   │                               │
+    │                   ▼                               │
+    │  ┌──────────────────────────────────────────┐  │
+    │  │       Internal API Server                │  │
+    │  │   (Computation state in Spanner)        │  │
+    │  └────────────────────┬─────────────────────┘  │
+    │                       │                          │
+    │          ┌────────┴────────┐                 │
+    │          │                   │                 │
+    │          ▼                   ▼                 │
+    │  ┌────────────────┐   ┌────────────────┐  │
+    │  │ Mill Job       │   │ Mill Workers   │  │
+    │  │ Scheduler      │   │ (LLv2, HMSS)   │  │
+    │  └────────────────┘   └────────────────┘  │
+    │                                                    │
+    │  ┌──────────────────────────────────────────┐  │
+    │  │   Computation Control Server             │  │
+    │  │   (Peer-to-peer coordination)            │  │
+    │  └──────────────────────────────────────────┘  │
+    │                                                    │
+    │  ┌──────────────────────────────────────────┐  │
+    │  │  Requisition Fulfillment Server         │  │
+    │  │  (Receives data from EDPs)               │  │
+    │  └──────────────────────────────────────────┘  │
+    └──────────────────────────────────────────────────┘
+                       │
+                       ▼
+            ┌───────────────────┐
+            │ Blob Storage     │
+            │ (GCS/S3)         │
+            └───────────────────┘
+```
+
+## Storage Infrastructure
+
+### Database (Spanner)
+
+Each duchy maintains its own Spanner database containing:
+
+**Computation State:**
+- Active computations and their current stage
+- Computation tokens for work locking
+- Protocol-specific details (participant info, stage data)
+- Continuation tokens for resuming work
+
+**Requisition Metadata:**
+- Requisitions assigned to this duchy
+- Fulfillment status and data locations
+- Encryption keys and certificates
+
+**Computation Statistics:**
+- Performance metrics
+- Stage transition times
+- Error counts and retry attempts
+
+### Blob Storage
+
+Duchies store large encrypted data in cloud blob storage (GCS for Google Cloud, S3 for AWS):
+
+- **Encrypted Sketches**: Encrypted event data from EDPs
+- **Intermediate Results**: Partially computed sketches during protocol execution
+- **Protocol Messages**: Large cryptographic payloads exchanged between duchies
+- **Computation Artifacts**: Temporary files during computation
+
+Blob storage is configured with flags like:
+```bash
+--google-cloud-storage-bucket=duchy-computation-storage
+--google-cloud-storage-project=my-project
+```
+
+## Computation Workflow
+
+The lifecycle of a computation in a duchy:
+
+<Steps>
+  <Step title="Work Discovery">
+    Herald daemon polls Kingdom for new computations assigned to this duchy
+  </Step>
+  <Step title="Work Claiming">
+    Duchy claims work by updating the computation state in Kingdom
+  </Step>
+  <Step title="Local Initialization">
+    Computation details are stored in local Spanner database
+  </Step>
+  <Step title="Job Scheduling">
+    Mill Job Scheduler creates Kubernetes Jobs for computation stages
+  </Step>
+  <Step title="Protocol Execution">
+    Mill workers execute cryptographic protocols, coordinating with peer duchies
+  </Step>
+  <Step title="Result Reporting">
+    Final results are sent back to Kingdom via System API
+  </Step>
+</Steps>
+
+### Work Locking
+
+Duchies use work locks to ensure:
+- Only one worker processes a computation stage at a time
+- Workers have sufficient time to complete stages
+- Stale locks are eventually released for retry
+
+Work lock durations are configurable per protocol:
+- Liquid Legions V2: `--llv2-work-lock-duration` (default varies by deployment)
+- Share Shuffle: `--hmss-work-lock-duration`
+
+## Multi-Duchy Coordination
+
+Computations require coordination between multiple duchies:
+
+### Peer Communication
+
+Duchies communicate via the **Computation Control Service**:
+- Each duchy exposes a Computation Control Server
+- Mill workers call peer duchies' Computation Control endpoints
+- Messages contain encrypted protocol data
+- All communication uses mutual TLS
+
+### Protocol Stages
+
+Most protocols have multiple stages that execute in sequence:
+
+**Example: Liquid Legions V2 (3 duchies)**
+1. **Initialization**: All duchies prepare encrypted sketches
+2. **Shuffle Phase**: Duchies shuffle and re-encrypt data
+3. **Aggregation Phase**: Combine encrypted sketches
+4. **Decryption Phase**: Collaboratively decrypt the aggregate
+
+Each duchy progresses through stages, coordinating with peers at each step.
+
+### Fault Tolerance
+
+<Accordion title="Computation Retry">
+  If a duchy fails during computation:
+  - The computation enters a retry state
+  - Herald can reclaim and restart failed work
+  - Maximum attempt limits prevent infinite retries
+  - Kingdom tracks participant failures
+</Accordion>
+
+<Accordion title="Transient Failures">
+  Network errors and transient failures are handled with:
+  - Exponential backoff retry logic
+  - Configurable maximum attempts (typically 10)
+  - Idempotent operations where possible
+</Accordion>
+
+## Duchy Identity and Roles
+
+Each duchy has:
+
+**Duchy ID**: Unique identifier (e.g., "worker1", "worker2", "aggregator")  
+**Certificates**: X.509 certificates for:
+- TLS server authentication
+- TLS client authentication  
+- Consent signaling
+
+**Roles in Computation**: Depending on the protocol, duchies may have different roles:
+- **Aggregator**: Duchy that produces the final aggregate (in some protocols)
+- **Non-Aggregators**: Duchies that contribute to computation but don't produce final result
+- **Workers**: Generic participant in symmetric protocols
+
+Roles are assigned based on:
+- Protocol configuration
+- Duchy ordering (alphabetical, etc.)
+- Specific protocol requirements
+
+## Computation Types
+
+Duchies support multiple computation types:
+
+<CardGroup cols={2}>
+  <Card title="Reach" icon="users">
+    Count unique users across multiple data sources
+  </Card>
+  <Card title="Reach & Frequency" icon="chart-column">
+    Measure reach and exposure frequency distribution
+  </Card>
+</CardGroup>
+
+Each computation type may use different protocols:
+- **Reach-Only Liquid Legions V2**: Optimized for reach measurements
+- **Reach-Frequency Liquid Legions V2**: Full reach and frequency
+- **Honest Majority Share Shuffle**: Alternative protocol with different security model
+
+## Privacy Guarantees
+
+Duchies enforce privacy through:
+
+### Differential Privacy
+
+- Noise is added to measurements at the duchy level
+- Noise mechanism configured by Measurement Consumer
+- Supported mechanisms: Laplace, Gaussian
+
+### Cryptographic Privacy
+
+- **Secure Multi-Party Computation**: No single duchy sees plaintext data
+- **Threshold Cryptography**: Multiple duchies required to decrypt
+- **Honest Majority Assumption**: System secure as long as majority (or specific subset) of duchies are honest
+
+### Data Minimization
+
+- Duchies only store encrypted sketches, not raw events
+- Intermediate results are deleted after computation
+- Computation cleanup jobs remove old data
+
+## Scaling and Performance
+
+### Horizontal Scaling
+
+Duchies can scale computation capacity:
+
+**Mill Workers**: Kubernetes Jobs created on-demand
+- Each mill job is an independent Kubernetes Job
+- Jobs execute protocol stages in parallel when possible
+- Max concurrency limits prevent resource exhaustion
+
+**Mill Parallelism**: Within a single mill worker:
+```bash
+--parallelism=2  # Process multiple blocks in parallel
+```
+
+### Resource Management
+
+Resource allocation is configured in Kubernetes deployments:
+- CPU and memory requests/limits for each service
+- Mill job scheduler resources (typically low: 50m CPU, 224Mi memory)
+- Mill worker resources (varies by workload)
+
+## Security Considerations
+
+<Note>
+**Trust Model**: Duchies must be operated by independent organizations. Collusion between all duchies could compromise privacy.
+</Note>
+
+- **Physical Security**: Duchies should run in secure, isolated environments
+- **Key Management**: Duchy private keys must be protected (HSM recommended)
+- **Network Isolation**: Strict network policies limit communication
+- **Audit Logging**: All operations logged for security monitoring
+- **Certificate Rotation**: Support for rotating TLS and signing certificates
+
+## Deployment Options
+
+Duchies can be deployed on:
+
+- **Google Cloud Platform**: Using GCS for blob storage, Cloud Spanner
+- **Amazon Web Services**: Using S3 for blob storage, can use Spanner or alternatives
+- **On-Premises**: With compatible storage backends
+
+The deployment is configured via CUE files in `src/main/k8s/duchy.cue`.
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Duchy Services" icon="server" href="/components/duchy/services">
+    Explore individual duchy services and their APIs
+  </Card>
+  <Card title="Duchy Daemons" icon="robot" href="/components/duchy/daemons">
+    Learn about background jobs and workers
+  </Card>
+  <Card title="Mill Protocols" icon="lock" href="/components/duchy/mill-protocols">
+    Deep dive into cryptographic protocols
+  </Card>
+</CardGroup>

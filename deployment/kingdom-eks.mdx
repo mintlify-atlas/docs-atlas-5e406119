@@ -1,0 +1,325 @@
+---
+title: "Deploy Kingdom on EKS"
+description: "Deploy Halo Kingdom components to Amazon Elastic Kubernetes Service"
+---
+
+## Overview
+
+This guide describes deploying the Kingdom to Amazon Elastic Kubernetes Service (EKS). Note that full Kingdom deployment on EKS is currently limited compared to GKE.
+
+<Note>
+The primary deployment platform for Kingdom is GKE. EKS support focuses on Duchy deployments. For full Kingdom functionality, we recommend deploying to GKE.
+</Note>
+
+## Prerequisites
+
+Complete the [deployment prerequisites](/deployment/prerequisites) including:
+
+- Bazel/Bazelisk installation
+- AWS CLI configuration
+- kubectl installation
+- Terraform installation
+
+## AWS vs GKE Considerations
+
+When deploying to AWS, note the following differences:
+
+<AccordionGroup>
+  <Accordion title="Database Backend">
+    - **GKE**: Cloud Spanner (globally distributed, strongly consistent)
+    - **EKS**: Amazon RDS PostgreSQL (regional)
+  </Accordion>
+
+  <Accordion title="Blob Storage">
+    - **GKE**: Google Cloud Storage
+    - **EKS**: Amazon S3
+  </Accordion>
+
+  <Accordion title="Key Management">
+    - **GKE**: Cloud KMS
+    - **EKS**: AWS KMS
+  </Accordion>
+
+  <Accordion title="Load Balancing">
+    - **GKE**: Google Cloud Load Balancer with static IPs
+    - **EKS**: AWS Network Load Balancer with Elastic IPs
+  </Accordion>
+</AccordionGroup>
+
+## Kingdom Architecture on AWS
+
+While Duchy components are fully supported on EKS, Kingdom deployment requires adaptation. The Kingdom components include:
+
+- **Data Server** - Internal ClusterIP service for Kingdom data
+- **System API Server** - External LoadBalancer for system operations
+- **Public API Server** - External LoadBalancer for measurement requests
+- **CronJobs** - Maintenance tasks (measurement deletion, exchange cleanup)
+
+## Recommended Approach
+
+<Warning>
+For production deployments, we recommend:
+
+1. **Deploy Kingdom on GKE** - Full support with Cloud Spanner
+2. **Deploy Duchies on EKS** - Full support for computation nodes
+3. **Cross-cloud connectivity** - Duchies connect to Kingdom via public APIs
+
+This hybrid approach leverages the strengths of each platform.
+</Warning>
+
+## Hybrid Deployment Architecture
+
+<Steps>
+  <Step title="Deploy Kingdom on GKE">
+    Follow the [Kingdom GKE deployment guide](/deployment/kingdom-gke) to deploy Kingdom components to Google Cloud.
+
+    Configure DNS for Kingdom services:
+    - `v2alpha.kingdom.example.com`
+    - `v1alpha.system.kingdom.example.com`
+  </Step>
+
+  <Step title="Deploy Duchies on EKS">
+    Follow the [Duchy EKS deployment guide](/deployment/duchy-eks) to deploy Duchy components to AWS.
+
+    Configure Duchy to connect to Kingdom public API:
+
+    ```bash
+    --define kingdom_public_api_target=v2alpha.kingdom.example.com:8443
+    ```
+  </Step>
+
+  <Step title="Configure Cross-Cloud Networking">
+    Ensure proper networking between clouds:
+
+    - Configure DNS resolution for Kingdom endpoints
+    - Set up proper firewall rules for TLS traffic (port 8443)
+    - Validate certificate trust chains
+  </Step>
+
+  <Step title="Verify Connectivity">
+    Test connectivity from EKS Duchy to GKE Kingdom:
+
+    ```bash
+    # From within a Duchy pod
+    kubectl exec -it <duchy-pod> -- \
+      curl -v https://v2alpha.kingdom.example.com:8443
+    ```
+  </Step>
+</Steps>
+
+## Database Considerations
+
+The Kingdom requires a globally consistent, strongly available database:
+
+<CardGroup cols={2}>
+  <Card title="Cloud Spanner (Recommended)" icon="google">
+    - Globally distributed
+    - Strong consistency
+    - 99.999% SLA
+    - Built for Kingdom workloads
+  </Card>
+  <Card title="RDS PostgreSQL (Limited)" icon="aws">
+    - Regional deployment
+    - Eventual consistency in multi-region
+    - Requires custom replication
+    - Limited scaling
+  </Card>
+</CardGroup>
+
+## Infrastructure Planning
+
+If you choose to deploy Kingdom on EKS, consider:
+
+### VPC Configuration
+
+```terraform
+module "vpc" {
+  source = "terraform-aws-modules/vpc/aws"
+  
+  name = "kingdom-vpc"
+  cidr = "10.0.0.0/16"
+  
+  azs              = ["us-east-1a", "us-east-1b"]
+  private_subnets  = ["10.0.4.0/24", "10.0.5.0/24"]
+  public_subnets   = ["10.0.8.0/24", "10.0.9.0/24"]
+  database_subnets = ["10.0.12.0/24", "10.0.13.0/24"]
+  
+  enable_nat_gateway = true
+  single_nat_gateway = false  # Use multiple for HA
+}
+```
+
+### EKS Cluster
+
+```terraform
+module "eks" {
+  source = "terraform-aws-modules/eks/aws"
+  
+  cluster_name    = "kingdom"
+  cluster_version = "1.29"
+  
+  vpc_id          = module.vpc.vpc_id
+  subnet_ids      = module.vpc.private_subnets
+  
+  eks_managed_node_groups = {
+    kingdom = {
+      instance_types = ["m5.xlarge"]
+      min_size       = 2
+      max_size       = 4
+      desired_size   = 2
+    }
+  }
+}
+```
+
+### RDS PostgreSQL
+
+```terraform
+module "rds" {
+  source = "terraform-aws-modules/rds/aws"
+  
+  identifier = "kingdom-db"
+  
+  engine               = "postgres"
+  engine_version       = "15.4"
+  instance_class       = "db.r6g.xlarge"
+  allocated_storage    = 100
+  storage_encrypted    = true
+  
+  multi_az             = true  # High availability
+  
+  vpc_security_group_ids = [aws_security_group.rds.id]
+  db_subnet_group_name   = module.vpc.database_subnet_group
+}
+```
+
+## Security Considerations
+
+<Steps>
+  <Step title="Certificate Management">
+    Use AWS Certificate Manager or your own CA:
+    - TLS certificates for all API endpoints
+    - Client certificates for authentication
+    - Root CA certificates for trust chains
+  </Step>
+
+  <Step title="Secrets Management">
+    Store sensitive data in AWS Secrets Manager:
+
+    ```bash
+    aws secretsmanager create-secret \
+      --name kingdom/tls-key \
+      --secret-binary fileb://kingdom_tls.key
+    ```
+
+    Reference in Kubernetes:
+
+    ```yaml
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: kingdom-certs
+    type: Opaque
+    data:
+      tls.key: # From AWS Secrets Manager
+    ```
+  </Step>
+
+  <Step title="Network Policies">
+    Configure Kubernetes NetworkPolicies:
+    - Default deny all traffic
+    - Allow only necessary service-to-service communication
+    - Restrict external access to API servers only
+  </Step>
+</Steps>
+
+## Monitoring and Observability
+
+Set up CloudWatch and Container Insights:
+
+```bash
+# Enable Container Insights
+aws eks update-cluster-config \
+  --name kingdom \
+  --logging '{"clusterLogging":[{"types":["api","audit","authenticator","controllerManager","scheduler"],"enabled":true}]}'
+
+# Install CloudWatch agent
+kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/quickstart/cwagent-fluentd-quickstart.yaml
+```
+
+## Cost Optimization
+
+<AccordionGroup>
+  <Accordion title="Use Spot Instances">
+    For non-critical workloads:
+
+    ```terraform
+    eks_managed_node_groups = {
+      spot = {
+        instance_types = ["m5.large", "m5a.large"]
+        capacity_type  = "SPOT"
+        min_size       = 0
+        max_size       = 10
+      }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="RDS Reserved Instances">
+    For production databases, use reserved instances for 30-60% cost savings.
+  </Accordion>
+
+  <Accordion title="S3 Lifecycle Policies">
+    Configure automatic archival:
+
+    ```terraform
+    lifecycle_rule {
+      enabled = true
+      
+      transition {
+        days          = 90
+        storage_class = "GLACIER"
+      }
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Migration Path
+
+If migrating from GKE to EKS:
+
+<Steps>
+  <Step title="Data Migration">
+    Export data from Cloud Spanner and import to RDS PostgreSQL. This requires schema conversion and extensive testing.
+  </Step>
+
+  <Step title="DNS Cutover">
+    Update DNS records to point to EKS load balancers.
+  </Step>
+
+  <Step title="Validation">
+    Run comprehensive integration tests before production traffic.
+  </Step>
+</Steps>
+
+<Warning>
+Migrating Kingdom from GKE to EKS is complex and not recommended for production systems without significant testing.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Deploy Kingdom on GKE" icon="google" href="/deployment/kingdom-gke">
+    Recommended: Use the fully supported GKE deployment
+  </Card>
+  <Card title="Deploy Duchy on EKS" icon="aws" href="/deployment/duchy-eks">
+    Deploy computation nodes on AWS
+  </Card>
+  <Card title="Terraform Guide" icon="code" href="/deployment/terraform">
+    Learn about infrastructure as code
+  </Card>
+  <Card title="Operations" icon="gears" href="/operations">
+    Manage and monitor your deployment
+  </Card>
+</CardGroup>

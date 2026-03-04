@@ -1,0 +1,331 @@
+---
+title: Contributing
+description: How to contribute to the Halo Cross-Media Measurement System
+---
+
+We welcome contributions to the Halo measurement system! This guide explains the process for submitting patches and contributions to the project.
+
+## Before You Begin
+
+<CardGroup cols={2}>
+  <Card title="Read the Docs" icon="book">
+    Familiarize yourself with the [Development Standards](./standards) and [Code Style](./standards#code-style) guidelines.
+  </Card>
+  <Card title="Set Up Your Environment" icon="laptop-code">
+    Follow the [Building](./building) and [IntelliJ Setup](./intellij-setup) guides to configure your development environment.
+  </Card>
+</CardGroup>
+
+## Contributor License Agreement
+
+Contributions to this project must be accompanied by a **Contributor License Agreement** (CLA).
+
+<Note>
+  You (or your employer) retain the copyright to your contribution. The CLA simply gives the project permission to use and redistribute your contributions as part of the project.
+</Note>
+
+### Signing the CLA
+
+<Steps>
+  <Step title="Check if you've signed">
+    If you've already submitted a CLA for any project in the World Federation of Advertisers organization, you likely don't need to do it again.
+  </Step>
+  
+  <Step title="Submit the CLA">
+    When you submit your first pull request, you'll be prompted to sign the CLA if you haven't already.
+  </Step>
+  
+  <Step title="Wait for verification">
+    The CLA bot will verify your signature before your PR can be merged.
+  </Step>
+</Steps>
+
+## Contribution Workflow
+
+### 1. Find or Create an Issue
+
+<Steps>
+  <Step title="Search existing issues">
+    Check if there's already an issue for the work you want to do in the [GitHub Issues](https://github.com/world-federation-of-advertisers/cross-media-measurement/issues).
+  </Step>
+  
+  <Step title="Create a new issue">
+    If no relevant issue exists:
+    
+    - Use the appropriate issue template (Bug, Feature Request, etc.)
+    - Write a clear, self-contained title
+    - Provide detailed description and context
+    - Add appropriate labels and type
+  </Step>
+  
+  <Step title="Discuss before major changes">
+    For significant changes, discuss your approach in the issue before starting work.
+  </Step>
+</Steps>
+
+<Tip>
+  Every PR should be associated with at least one GitHub issue. This helps track the context and reasoning behind changes.
+</Tip>
+
+### 2. Create a Branch
+
+```bash
+# Update your main branch
+git checkout main
+git pull origin main
+
+# Create a feature branch
+git checkout -b feature/your-feature-name
+```
+
+### 3. Make Your Changes
+
+<Steps>
+  <Step title="Write code">
+    Implement your changes following the [Development Standards](./standards).
+  </Step>
+  
+  <Step title="Add tests">
+    - Write unit tests for new functionality
+    - Ensure existing tests still pass
+    - See [Testing Guide](./testing) for details
+  </Step>
+  
+  <Step title="Update documentation">
+    Update relevant documentation for your changes, including:
+    - Code comments
+    - README files
+    - API documentation
+  </Step>
+</Steps>
+
+### 4. Format and Lint
+
+Before committing, ensure your code is properly formatted:
+
+<CodeGroup>
+```bash Kotlin
+# Format Kotlin files
+ktfmt --google-style src/main/kotlin/**/*.kt
+ktfmt --google-style src/test/kotlin/**/*.kt
+```
+
+```bash C++
+# Format C++ files
+clang-format --style=Google -i src/main/cc/**/*.{cc,h}
+```
+
+```bash Bazel
+# Format BUILD files
+buildifier -r .
+```
+</CodeGroup>
+
+### 5. Run Tests
+
+Verify all tests pass:
+
+```bash
+# Run all tests
+bazel test //src/test/...
+
+# Or use containerized build
+tools/bazel-container test //src/test/...
+```
+
+### 6. Commit Your Changes
+
+Follow the [Conventional Commits](https://www.conventionalcommits.org/) specification:
+
+```bash
+git add .
+git commit -m "feat(component): Add new feature
+
+Detailed description of the change and why it was made.
+
+Issue: world-federation-of-advertisers/cross-media-measurement#123"
+```
+
+<Note>
+  See [Commit Message Format](./standards#commit-message-format) for detailed guidelines.
+</Note>
+
+### 7. Push and Create Pull Request
+
+```bash
+# Push your branch
+git push origin feature/your-feature-name
+```
+
+Then:
+
+<Steps>
+  <Step title="Open PR on GitHub">
+    Navigate to the repository and click "New Pull Request"
+  </Step>
+  
+  <Step title="Fill out PR template">
+    - Write a clear title following commit message format
+    - Provide detailed description
+    - Reference related issues using `Issue: org/repo#number`
+    - List breaking changes if any
+  </Step>
+  
+  <Step title="Review your own PR first">
+    Before adding reviewers:
+    - Check for typos
+    - Verify tests pass
+    - Ensure documentation is complete
+    - Look for `DO_NOT_SUBMIT` markers
+  </Step>
+</Steps>
+
+## Code Review Process
+
+All submissions require review through [Reviewable.io](https://reviewable.io).
+
+<Steps>
+  <Step title="Wait for automated checks">
+    CI/CD pipelines will automatically:
+    - Run tests
+    - Check formatting
+    - Verify build succeeds
+    - Check for `DO_NOT_SUBMIT` markers
+  </Step>
+  
+  <Step title="Address review comments">
+    - Respond to feedback in Reviewable
+    - Make requested changes
+    - Push updates to your branch
+    - Mark comments as "Satisfied" when addressed
+  </Step>
+  
+  <Step title="Get approval">
+    Once all blocking comments are resolved, the reviewer will approve.
+  </Step>
+  
+  <Step title="Merge">
+    After approval and passing checks:
+    - A maintainer will merge your PR through GitHub UI
+    - Ensure commit message is properly formatted (remove GitHub's line wrapping)
+  </Step>
+</Steps>
+
+<Warning>
+  Remove any line wrapping that GitHub introduces into the PR title and final commit message to ensure parseability.
+</Warning>
+
+## Contribution Guidelines
+
+### Do's
+
+<CardGroup cols={2}>
+  <Card title="Write Tests" icon="vial">
+    All new code should include comprehensive unit tests
+  </Card>
+  
+  <Card title="Follow Style Guides" icon="palette">
+    Use automated formatters and follow language-specific guidelines
+  </Card>
+  
+  <Card title="Document Changes" icon="book">
+    Update docs, add comments, explain complex logic
+  </Card>
+  
+  <Card title="Keep PRs Focused" icon="bullseye">
+    One logical change per PR makes review easier
+  </Card>
+</CardGroup>
+
+### Don'ts
+
+<CardGroup cols={2}>
+  <Card title="Don't Mix Concerns" icon="ban">
+    Avoid combining refactoring with feature changes
+  </Card>
+  
+  <Card title="Don't Skip Tests" icon="flask-vial">
+    Never submit code without running the test suite
+  </Card>
+  
+  <Card title="Don't Add Secrets" icon="key">
+    Never commit credentials, API keys, or sensitive data
+  </Card>
+  
+  <Card title="Don't Break Builds" icon="hammer">
+    Ensure your changes don't introduce build failures
+  </Card>
+</CardGroup>
+
+## Types of Contributions
+
+### Bug Fixes
+
+1. Create or find a bug issue
+2. Write a failing test that reproduces the bug
+3. Fix the bug
+4. Verify the test now passes
+5. Submit PR with `fix:` commit type
+
+### New Features
+
+1. Discuss the feature in an issue first
+2. Design the API/interface
+3. Implement with comprehensive tests
+4. Update documentation
+5. Submit PR with `feat:` commit type
+
+### Documentation
+
+1. Identify gaps or errors in documentation
+2. Make improvements
+3. Submit PR with `docs:` commit type
+
+### Performance Improvements
+
+1. Create an issue with benchmarks showing the problem
+2. Implement optimization
+3. Provide before/after benchmarks
+4. Submit PR with `perf:` commit type
+
+## Getting Help
+
+<CardGroup cols={2}>
+  <Card title="GitHub Issues" icon="github">
+    Ask questions or report problems in [GitHub Issues](https://github.com/world-federation-of-advertisers/cross-media-measurement/issues)
+  </Card>
+  
+  <Card title="Discussions" icon="comments">
+    Start a discussion for broader topics or questions
+  </Card>
+</CardGroup>
+
+## Recognition
+
+Contributors are recognized through:
+
+- GitHub commit history
+- Release notes for significant contributions
+- Public acknowledgment in project communications
+
+<Note>
+  By contributing, you agree that your contributions will be licensed under the same license as the project (Apache 2.0).
+</Note>
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Dev Standards" icon="book" href="./standards">
+    Review commit and code review standards
+  </Card>
+  <Card title="Building" icon="hammer" href="./building">
+    Learn about the build system
+  </Card>
+  <Card title="Testing" icon="flask" href="./testing">
+    Understand testing requirements
+  </Card>
+</CardGroup>
+
+## Thank You!
+
+Thank you for contributing to the Halo Cross-Media Measurement System! Your contributions help advance privacy-preserving measurement for the advertising industry.

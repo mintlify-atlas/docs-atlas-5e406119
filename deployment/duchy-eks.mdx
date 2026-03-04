@@ -1,0 +1,480 @@
+---
+title: "Deploy Duchy on EKS"
+description: "Deploy Halo Duchy components to Amazon Elastic Kubernetes Service"
+---
+
+## Overview
+
+This guide walks you through deploying a Duchy to Amazon Elastic Kubernetes Service (EKS). Duchies on EKS can participate in the Halo measurement system alongside Kingdom deployments on GKE.
+
+<Note>
+Duchies deployed on EKS connect to a Kingdom deployed on GKE via public APIs. Cross-cloud deployment is fully supported.
+</Note>
+
+## Prerequisites
+
+Complete the [deployment prerequisites](/deployment/prerequisites) including:
+
+- Bazel/Bazelisk installation
+- AWS CLI configuration
+- kubectl installation
+- Terraform installation
+- Duchy registration with Kingdom operator
+
+## Duchy Registration
+
+Before deployment, register your Duchy with the Kingdom operator (offline process):
+
+<Steps>
+  <Step title="Prepare Registration Information">
+    Share with the Kingdom operator:
+    - Duchy name (unique string ID, e.g., `worker2`)
+    - CA (root) certificate
+    - Consent signaling (leaf) certificate
+  </Step>
+
+  <Step title="Receive Resource Names">
+    The Kingdom operator will register resources and provide resource names back to you.
+  </Step>
+</Steps>
+
+## Duchy Components on EKS
+
+For a Duchy named `worker2`, the deployment creates:
+
+<AccordionGroup>
+  <Accordion title="Services">
+    - `worker2-async-computation-control-server` (ClusterIP)
+    - `worker2-internal-api-server` (ClusterIP)
+    - `worker2-computation-control-server` (LoadBalancer) - System API
+    - `worker2-requisition-fulfillment-server` (LoadBalancer) - Public API
+  </Accordion>
+
+  <Accordion title="Deployments">
+    - `worker2-async-computation-control-server-deployment`
+    - `worker2-computation-control-server-deployment`
+    - `worker2-herald-daemon-deployment`
+    - `worker2-requisition-fulfillment-server-deployment`
+    - `worker2-spanner-computations-server-deployment`
+    - `worker2-mill-job-scheduler-deployment`
+  </Accordion>
+
+  <Accordion title="PodTemplates (Mill Jobs)">
+    - `worker2-llv2-mill` - Liquid Legions v2 protocol
+    - `worker2-hmss-mill` - Honest Majority Share Shuffle protocol
+  </Accordion>
+
+  <Accordion title="CronJobs">
+    - `worker2-computations-cleaner-cronjob`
+  </Accordion>
+
+  <Accordion title="Network Policies">
+    - `default-deny-network-policy`
+    - `kube-dns-network-policy`
+    - Service-specific network policies
+  </Accordion>
+</AccordionGroup>
+
+## AWS Infrastructure
+
+The deployment creates:
+
+- **VPC** with public, private, database, and intra subnets across 2 availability zones
+- **EKS Cluster** (v1.29) with two node groups:
+  - Default: m5.large instances (max 2 nodes)
+  - High-performance: c5.xlarge instances (max 20 nodes) for computation mills
+- **RDS PostgreSQL** for computation state storage
+- **S3 Bucket** for blob storage
+- **Elastic IPs** for stable external endpoints
+
+## Deployment Steps
+
+<Steps>
+  <Step title="Provision Infrastructure with Terraform">
+    Use the example Terraform configuration:
+
+    ```bash
+    cd src/main/terraform/aws/examples/duchy
+    ```
+
+    The configuration already includes S3 backend setup:
+
+    ```terraform
+    terraform {
+      backend "s3" {
+        key = "terraform.tfstate"
+      }
+    }
+    ```
+
+    Create `terraform.tfvars`:
+
+    ```terraform terraform.tfvars
+    aws_region              = "us-west-2"
+    duchy_name              = "worker2-duchy"
+    vpc_name                = "halo-worker2-vpc"
+    bucket_name             = "halo-worker2-storage"
+    postgres_instance_name  = "worker2-postgres"
+    postgres_instance_tier  = "db.t3.medium"
+    ```
+
+    Initialize and apply:
+
+    ```bash
+    terraform init \
+      -backend-config="bucket=my-terraform-state" \
+      -backend-config="region=us-west-2"
+    
+    terraform plan
+    terraform apply
+    ```
+
+    <Note>
+    VPC CIDR is automatically set to `10.0.0.0/16` with subnets:
+    - Private: 10.0.4.0/24, 10.0.5.0/24
+    - Public: 10.0.8.0/24, 10.0.9.0/24
+    - Database: 10.0.12.0/24, 10.0.13.0/24
+    - Intra: 10.0.16.0/24, 10.0.17.0/24
+    </Note>
+  </Step>
+
+  <Step title="Get Cluster Credentials">
+    Configure kubectl for your EKS cluster:
+
+    ```bash
+    aws eks update-kubeconfig --region us-west-2 --name worker2-duchy
+    ```
+
+    Verify access:
+
+    ```bash
+    kubectl get nodes
+    ```
+  </Step>
+
+  <Step title="Get RDS Connection Info">
+    Retrieve the RDS endpoint and secret name from Terraform outputs:
+
+    ```bash
+    terraform output
+    ```
+
+    Note the following for Kustomization generation:
+    - `postgres_host` (e.g., `dev-postgres.c7lbzsffeehq.us-west-2.rds.amazonaws.com`)
+    - `postgres_port` (typically `5432`)
+    - `postgres_credential_secret_name` (e.g., `rds!db-b4bebc1a-...`)
+  </Step>
+
+  <Step title="Get Elastic IP Allocation IDs">
+    Retrieve EIP allocation IDs for load balancers:
+
+    ```bash
+    terraform output -json | jq -r '.eip_allocation_ids.value'
+    ```
+
+    Note these for the Kustomization build.
+  </Step>
+
+  <Step title="Build and Push Container Images (Optional)">
+    If not using pre-built release images:
+
+    ```bash
+    # Authenticate to ECR
+    aws ecr get-login-password --region us-west-2 | \
+      docker login --username AWS --password-stdin \
+      010295286036.dkr.ecr.us-west-2.amazonaws.com
+
+    # Build and push
+    bazel run -c opt //src/main/docker:push_all_duchy_eks_images \
+      --define container_registry=010295286036.dkr.ecr.us-west-2.amazonaws.com \
+      --define image_repo_prefix=halo-worker2-demo \
+      --define image_tag=build-0001
+    ```
+  </Step>
+
+  <Step title="Generate Kubernetes Kustomization">
+    Generate the K8s configuration for AWS:
+
+    ```bash
+    bazel build //src/main/k8s/dev:worker2_duchy_aws.tar \
+      --define kingdom_system_api_target=v1alpha.system.kingdom.dev.halo-cmm.org:8443 \
+      --define s3_bucket=halo-worker2-storage \
+      --define s3_region=us-west-2 \
+      --define duchy_cert_id=Yq3IyKAQ5Qc \
+      --define postgres_host=dev-postgres.c7lbzsffeehq.us-west-2.rds.amazonaws.com \
+      --define postgres_port=5432 \
+      --define postgres_region=us-west-2 \
+      --define postgres_credential_secret_name="rds\!db-b4bebc1a-b72d-4d6f-96d4-d3cde3c6af91" \
+      --define duchy_public_api_eip_allocs="eipalloc-1234abc,eipalloc-5678def" \
+      --define duchy_system_api_eip_allocs="eipalloc-1234def,eipalloc-5678abc" \
+      --define container_registry=ghcr.io \
+      --define image_repo_prefix=world-federation-of-advertisers \
+      --define image_tag=0.5.2
+    ```
+
+    Extract to a secure location:
+
+    ```bash
+    mkdir -p ~/worker2-duchy-deployment
+    tar -xf bazel-bin/src/main/k8s/dev/worker2_duchy_aws.tar -C ~/worker2-duchy-deployment
+    ```
+
+    <Note>
+    The `duchy_cert_id` is provided by the Kingdom operator during registration.
+    </Note>
+  </Step>
+
+  <Step title="Customize Kubernetes Secret">
+    Prepare files in `~/worker2-duchy-deployment/src/main/k8s/dev/worker2_duchy_secret/`:
+
+    **Required Files:**
+
+    1. **`all_root_certs.pem`** - TLS trusted CA store
+       ```bash
+       cat *_root.pem > all_root_certs.pem
+       ```
+
+    2. **`worker2_tls.pem`** - Duchy's TLS certificate (PEM format)
+
+    3. **`worker2_tls.key`** - Private key for TLS certificate (PEM format)
+
+    4. **`worker2_cs_cert.der`** - Consent signaling certificate (DER format)
+
+    5. **`worker2_cs_private.der`** - Private key for consent signaling (DER format)
+
+    6. **`duchy_cert_config.textproto`** - Duchy certificate to ID mapping
+
+    7. **`xxx_protocols_setup_config.textproto`** - Protocol configuration
+       - Replace `xxx` with `aggregator` or `non_aggregator`
+
+    8. **`worker2_kek.tink`** - Key encryption key for HMSS protocol
+       ```bash
+       tinkey create-keyset --key-template AES128_GCM \
+         --out-format binary --out worker2_kek.tink
+       ```
+
+    <Warning>
+    For testing only:
+    ```bash
+    bazel build //src/main/k8s/testing/secretfiles:archive
+    tar -xf bazel-bin/src/main/k8s/testing/secretfiles/archive.tar \
+      -C ~/worker2-duchy-deployment/src/main/k8s/dev/worker2_duchy_secret/
+    ```
+    **Never use test certificates in production!**
+    </Warning>
+  </Step>
+
+  <Step title="Customize Kubernetes ConfigMap">
+    Place `authority_key_identifier_to_principal_map.textproto` in:
+    `~/worker2-duchy-deployment/src/main/k8s/dev/config_files/`
+  </Step>
+
+  <Step title="Apply Kubernetes Kustomization">
+    Deploy all Duchy components:
+
+    ```bash
+    cd ~/worker2-duchy-deployment
+    kubectl apply -k src/main/k8s/dev/worker2_duchy_aws
+    ```
+
+    Verify deployment:
+
+    ```bash
+    kubectl get deployments
+    kubectl get services
+    ```
+
+    Expected output:
+
+    ```
+    NAME                                                  READY   UP-TO-DATE   AVAILABLE
+    worker2-async-computation-control-server-deployment   1/1     1            1
+    worker2-computation-control-server-deployment         1/1     1            1
+    worker2-herald-daemon-deployment                      1/1     1            1
+    worker2-requisition-fulfillment-server-deployment     1/1     1            1
+    worker2-spanner-computations-server-deployment        1/1     1            1
+    ```
+
+    ```
+    NAME                                     TYPE           EXTERNAL-IP
+    worker2-computation-control-server       LoadBalancer   k8s-default-worker2c-...elb.us-west-2.amazonaws.com
+    worker2-requisition-fulfillment-server   LoadBalancer   k8s-default-worker2r-...elb.us-west-2.amazonaws.com
+    ```
+  </Step>
+</Steps>
+
+## Certificate Management
+
+Generate certificates using AWS Certificate Manager or your preferred CA.
+
+**TLS Certificate Requirements:**
+- Support both client and server TLS
+- Include in Subject Alternative Name (SAN):
+  - Hostnames for load balancers
+  - `localhost`
+
+**Format Conversion:**
+
+```bash
+# PEM to DER conversion
+openssl x509 -in cert.pem -outform der -out cert.der
+openssl pkcs8 -topk8 -in key.pem -outform der -out key.der -nocrypt
+```
+
+## Athena Database Querying
+
+Set up Athena to query the PostgreSQL database:
+
+<Steps>
+  <Step title="Create Lambda Function">
+    Follow [AWS instructions](https://docs.aws.amazon.com/athena/latest/ug/connectors-postgresql.html) to create an `athena_postgres_connector`.
+
+    **Lambda Configuration:**
+    - **SecretNamePrefix**: `rds`
+    - **ConnectionString**: `postgres://jdbc:postgresql://{postgres_hostname}:5432/postgres?secret=${secret_name}`
+    - **Subnets**: Two database subnet IDs from VPC
+    - **Security Groups**: EKS cluster security group
+  </Step>
+
+  <Step title="Create Athena Data Source">
+    Create an Athena data source using the Lambda connection.
+  </Step>
+
+  <Step title="Query in Athena Console">
+    Run queries in the Athena query editor:
+
+    ```sql
+    SELECT * FROM "lambda:athena_postgres_connector".postgres.computations
+    LIMIT 10;
+    ```
+  </Step>
+</Steps>
+
+## Terraform Configuration Reference
+
+<CodeGroup>
+```terraform VPC & Networking
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.1.1"
+  
+  name = var.vpc_name
+  cidr = "10.0.0.0/16"
+  
+  azs              = ["us-west-2a", "us-west-2b"]
+  private_subnets  = ["10.0.4.0/24", "10.0.5.0/24"]
+  public_subnets   = ["10.0.8.0/24", "10.0.9.0/24"]
+  database_subnets = ["10.0.12.0/24", "10.0.13.0/24"]
+  
+  enable_nat_gateway = true
+  single_nat_gateway = true
+}
+```
+
+```terraform EKS Cluster
+module "cluster" {
+  source = "../../modules/eks-cluster"
+  
+  cluster_name    = var.duchy_name
+  cluster_version = "1.29"
+  
+  vpc_id                   = module.vpc.vpc_id
+  subnet_ids               = module.vpc.private_subnets
+  control_plane_subnet_ids = module.vpc.intra_subnets
+  
+  default_instance_types   = ["m5.large"]
+  default_max_node_count   = 2
+  high_perf_instance_types = ["c5.xlarge"]
+  high_perf_max_node_count = 20
+}
+```
+
+```terraform RDS PostgreSQL
+module "postgres" {
+  source = "../../modules/rds-postgres"
+  
+  name              = var.postgres_instance_name
+  instance_class    = var.postgres_instance_tier
+  subnet_group_name = module.vpc.database_subnet_group
+  vpc_cidr_block    = module.vpc.vpc_cidr_block
+  vpc_id            = module.vpc.vpc_id
+}
+```
+
+```terraform S3 Storage
+module "storage" {
+  source = "../../modules/s3-bucket"
+  
+  bucket_name = var.bucket_name
+}
+```
+</CodeGroup>
+
+## Monitoring and Logging
+
+Enable CloudWatch Container Insights:
+
+```bash
+# Enable control plane logging
+aws eks update-cluster-config \
+  --name worker2-duchy \
+  --region us-west-2 \
+  --logging '{"clusterLogging":[{"types":["api","audit","authenticator"],"enabled":true}]}'
+
+# Install CloudWatch agent
+kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/quickstart/cwagent-fluentd-quickstart.yaml
+```
+
+## Testing the Deployment
+
+Verify the Duchy works correctly:
+
+1. **Connectivity Test**: Ensure Duchy can reach Kingdom public API
+   ```bash
+   kubectl exec -it <duchy-pod> -- \
+     curl -v https://v1alpha.system.kingdom.dev.halo-cmm.org:8443
+   ```
+
+2. **Correctness Test**: Run a [multi-cluster correctness test](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/docs/gke/correctness-test.md)
+
+## Updating Configuration
+
+To update secrets or configuration:
+
+```bash
+cd ~/worker2-duchy-deployment
+kubectl apply -k src/main/k8s/dev/worker2_duchy_aws
+```
+
+## Cost Optimization
+
+<AccordionGroup>
+  <Accordion title="Use Spot Instances for Mills">
+    Configure spot instances for the high-performance node group to reduce computation costs by up to 90%.
+  </Accordion>
+
+  <Accordion title="RDS Reserved Instances">
+    For production, purchase RDS reserved instances for 30-60% savings.
+  </Accordion>
+
+  <Accordion title="S3 Lifecycle Policies">
+    Configure automatic archival of old computation blobs to Glacier.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Operations Guide" icon="gears" href="/operations">
+    Learn about managing the Duchy
+  </Card>
+  <Card title="Correctness Testing" icon="check" href="https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/docs/gke/correctness-test.md">
+    Run end-to-end tests
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Set up monitoring and alerts
+  </Card>
+  <Card title="Monitoring" icon="wrench" href="/operations/monitoring">
+    Monitor your Duchy deployment
+  </Card>
+</CardGroup>

@@ -1,0 +1,139 @@
+---
+title: "Differential Privacy"
+description: "Understanding differential privacy and its role in protecting individual privacy in cross-media measurements"
+---
+
+## What is Differential Privacy?
+
+Differential privacy is a mathematical framework for quantifying and limiting the privacy risk when analyzing datasets containing sensitive information. In the Halo Cross-Media Measurement System, differential privacy ensures that individual user data cannot be extracted from measurement results, even when an adversary has access to aggregate statistics.
+
+<Info>
+Differential privacy provides a rigorous guarantee: the presence or absence of any single individual in a dataset has a negligible effect on the output of any analysis.
+</Info>
+
+## Why Differential Privacy?
+
+The measurement system processes sensitive user-level data from multiple publishers to compute cross-media reach and frequency statistics. Without privacy protections, these aggregated measurements could leak information about individual users, especially when:
+
+- Multiple measurements are made over the same population
+- Adversaries have auxiliary information about users
+- Small audience segments are measured
+
+Differential privacy addresses these risks by introducing carefully calibrated **noise** into the computation, making it mathematically impossible to determine whether any specific individual contributed to the result.
+
+## How Noise Protects Privacy
+
+The system adds random noise at multiple stages of the measurement protocol:
+
+### Publisher-Level Noise
+
+Publishers add noise when computing their encrypted sketches. This protects individual user privacy against other participants in the measurement system.
+
+### Global Noise Mechanisms
+
+The Duchies introduce additional noise during the secure multiparty computation phases:
+
+<Accordion title="Blind Histogram Noise">
+Added during the setup phase to protect the distribution of user frequencies across publishers. This noise is distributed among multiple Duchies to maintain security even if some Duchies are compromised.
+</Accordion>
+
+<Accordion title="Reach Noise">
+Applied to the final reach estimate to ensure that the total unique audience count preserves differential privacy guarantees.
+</Accordion>
+
+<Accordion title="Frequency Noise">
+Added to frequency distribution estimates to protect information about how many times individual users were exposed to campaigns.
+</Accordion>
+
+### Noise Mechanisms
+
+The system supports multiple noise mechanisms based on the measurement requirements:
+
+- **Laplace Mechanism**: Adds noise from a Laplace distribution, suitable for unbounded sensitivity queries
+- **Gaussian Mechanism**: Uses Gaussian noise for better accuracy in certain scenarios
+- **Discrete Noise**: Integer-valued noise for count-based measurements
+
+The noise mechanism is configured per measurement based on the required privacy level and accuracy trade-offs.
+
+## Privacy Budget Management
+
+Differential privacy uses the concept of a **privacy budget** (epsilon, ε) to quantify privacy loss:
+
+- **Lower ε values** = stronger privacy guarantees, but more noise and less accuracy
+- **Higher ε values** = weaker privacy guarantees, but less noise and higher accuracy
+
+### Privacy Budget Composition
+
+When multiple measurements are performed on the same population, privacy budgets accumulate. The system tracks and manages this composition to ensure total privacy loss remains within acceptable bounds.
+
+<Note>
+Typical privacy parameters used in the system:
+- **ε (epsilon)**: Privacy budget, commonly set between 1.0 and 10.0
+- **δ (delta)**: Failure probability, typically set to 1/population_size or smaller
+</Note>
+
+### Distributed Privacy Budget
+
+In the multi-party setting, the total privacy budget is distributed among:
+
+1. **Publisher noise**: Each data provider's contribution to privacy
+2. **MPC noise**: Noise added by Duchies during computation
+3. **Multiple queries**: Budget allocated across different measurements
+
+The system coordinates these allocations to maintain the overall privacy guarantee specified in measurement requests.
+
+## Privacy-Accuracy Trade-offs
+
+Differential privacy involves fundamental trade-offs:
+
+| Aspect | Impact |
+|--------|--------|
+| **Smaller audiences** | Require more noise (relative to signal), reducing accuracy |
+| **Tighter privacy budgets** | Better privacy but lower measurement precision |
+| **Frequency estimation** | More complex than reach, requires additional budget |
+| **Multiple queries** | Each query consumes budget, limiting total measurements |
+
+The system is designed to optimize these trade-offs while maintaining strong privacy guarantees.
+
+## Research Foundations
+
+The differential privacy implementation is based on extensive research:
+
+<CardGroup cols={2}>
+  <Card title="Privacy-Preserving Reach Estimation" href="https://research.google/pubs/pub49526/">
+    System design paper covering the complete architecture
+  </Card>
+  
+  <Card title="Secure Cardinality Estimation" href="https://research.google/pubs/pub49177/">
+    Technical details on privacy-preserving cardinality and frequency estimation
+  </Card>
+</CardGroup>
+
+## Additional Resources
+
+For those new to differential privacy, the following resources provide comprehensive introductions:
+
+- **Differential Privacy from the Ground Up**: Conceptual introduction to differential privacy fundamentals (available in `~/workspace/source/docs/dp_intro/`)
+- **Introduction to Differential Privacy (Slides)**: Visual presentation of key concepts
+- **Differential Privacy and Randomized Response**: Historical context and classical techniques
+
+## Implementation in Halo
+
+The noise computation is implemented in:
+
+- **C++ noise parameters**: `src/main/cc/wfa/measurement/internal/duchy/protocol/common/noise_parameters_computation.h`
+- **Protocol configurations**: `src/main/proto/wfa/measurement/internal/duchy/protocol/liquid_legions_v2_noise_config.proto`
+
+See [Protocol Cryptography](/concepts/protocol-cryptography) for how noise is applied during the MPC protocol phases.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Secure Computation" href="/concepts/secure-computation">
+    Learn how multiple parties compute results without revealing individual data
+  </Card>
+  
+  <Card title="Sketches" href="/concepts/sketches">
+    Understand the data structures that enable privacy-preserving measurements
+  </Card>
+</CardGroup>

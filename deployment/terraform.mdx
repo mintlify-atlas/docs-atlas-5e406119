@@ -1,0 +1,606 @@
+---
+title: "Terraform Infrastructure"
+description: "Using Terraform to provision cloud infrastructure for Halo CMMS components"
+---
+
+## Overview
+
+The Halo Cross-Media Measurement System provides Terraform modules and examples for provisioning cloud infrastructure on both Google Cloud Platform (GKE) and Amazon Web Services (EKS).
+
+<Note>
+Terraform configurations are located in the source repository:
+- GKE: `src/main/terraform/gcloud/`
+- EKS: `src/main/terraform/aws/`
+</Note>
+
+## Repository Structure
+
+The Terraform code is organized into reusable modules and examples:
+
+```
+src/main/terraform/
+├── gcloud/
+│   ├── modules/          # Reusable GKE modules
+│   │   ├── cluster/      # GKE cluster configuration
+│   │   ├── common/       # KMS, service accounts
+│   │   ├── duchy/        # Duchy-specific resources
+│   │   ├── kingdom/      # Kingdom-specific resources
+│   │   ├── node-pool/    # Node pool configuration
+│   │   └── storage-bucket/
+│   └── examples/         # Ready-to-use examples
+│       ├── duchy/
+│       ├── kingdom/
+│       ├── reporting/
+│       └── simulators/
+└── aws/
+    ├── modules/          # Reusable EKS modules
+    │   ├── eks-cluster/
+    │   ├── eks-cluster-addons/
+    │   ├── duchy/
+    │   ├── rds-postgres/
+    │   └── s3-bucket/
+    └── examples/         # Ready-to-use examples
+        └── duchy/
+```
+
+## Getting Started
+
+<Steps>
+  <Step title="Copy Terraform Configuration">
+    Copy the appropriate parent directory to your workspace:
+
+    <CodeGroup>
+    ```bash GKE
+    cp -r src/main/terraform/gcloud ~/my-deployment/
+    cd ~/my-deployment/gcloud
+    ```
+
+    ```bash EKS
+    cp -r src/main/terraform/aws ~/my-deployment/
+    cd ~/my-deployment/aws
+    ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Configure Backend">
+    Add backend configuration to persist Terraform state.
+
+    <CodeGroup>
+    ```terraform GKE - backend.tf
+    terraform {
+      backend "gcs" {
+        bucket = "my-terraform-state-bucket"
+        prefix = "terraform/state/halo-cmms"
+      }
+    }
+    ```
+
+    ```terraform EKS - backend.tf
+    terraform {
+      backend "s3" {
+        bucket = "my-terraform-state-bucket"
+        key    = "terraform/state/halo-cmms"
+        region = "us-west-2"
+      }
+    }
+    ```
+    </CodeGroup>
+
+    <Note>
+    Create the storage bucket manually before running `terraform init`.
+    </Note>
+  </Step>
+
+  <Step title="Initialize Terraform">
+    ```bash
+    terraform init
+    ```
+
+    This downloads required providers and initializes the backend.
+  </Step>
+
+  <Step title="Review and Apply">
+    ```bash
+    terraform plan
+    terraform apply
+    ```
+  </Step>
+</Steps>
+
+## GKE Configuration Examples
+
+### Kingdom on GKE
+
+The Kingdom example creates:
+
+- **GKE Cluster** named `kingdom`
+- **Cloud Spanner Instance** with 1000 processing units (Enterprise edition)
+- **KMS Key Ring** for encryption
+- **Node Pool** with e2-custom-2-4096 instances (max 2 nodes)
+
+<CodeGroup>
+```terraform main.tf
+module "kingdom_cluster" {
+  source = "../../modules/cluster"
+
+  name            = var.cluster_name
+  location        = local.cluster_location
+  release_channel = var.cluster_release_channel
+  secret_key      = module.common.cluster_secret_key
+}
+
+resource "google_spanner_instance" "spanner_instance" {
+  name             = var.spanner_instance_name
+  config           = var.spanner_instance_config
+  display_name     = "Halo CMMS"
+  processing_units = 1000
+  edition          = "ENTERPRISE"
+}
+
+module "kingdom_default_node_pool" {
+  source = "../../modules/node-pool"
+
+  name            = "default"
+  cluster         = module.kingdom_cluster.cluster
+  service_account = module.common.cluster_service_account
+  machine_type    = "e2-custom-2-4096"
+  max_node_count  = 2
+}
+```
+
+```terraform variables.tf
+variable "cluster_name" {
+  description = "Name of the cluster."
+  type        = string
+  default     = "kingdom"
+}
+
+variable "spanner_instance_name" {
+  description = "Google Cloud Spanner instance name."
+  type        = string
+  default     = "halo-cmms"
+}
+
+variable "spanner_instance_config" {
+  description = "Google Cloud Spanner instance configuration."
+  type        = string
+  default     = "regional-us-central1"
+}
+
+variable "cluster_release_channel" {
+  description = "Release channel of the GKE cluster."
+  type        = string
+  default     = "REGULAR"
+}
+```
+</CodeGroup>
+
+### Duchy on GKE
+
+The Duchy example creates:
+
+- **GKE Cluster** named `{duchy-name}-duchy`
+- **Cloud Spanner Instance** for computation storage
+- **Cloud Storage Bucket** for blob storage
+- **Two Node Pools**:
+  - Default: e2-standard-2 (max 2 nodes)
+  - Spot: c2-standard-4 (max 20 nodes) for computation mills
+
+<CodeGroup>
+```terraform main.tf
+module "cluster" {
+  source = "../../modules/cluster"
+
+  name                = local.cluster_name
+  location            = local.cluster_location
+  release_channel     = var.cluster_release_channel
+  secret_key          = module.common.cluster_secret_key
+  autoscaling_profile = "BALANCED"
+}
+
+resource "google_spanner_instance" "spanner_instance" {
+  name         = var.spanner_instance_name
+  config       = var.spanner_instance_config
+  display_name = "Halo CMMS"
+}
+
+module "storage" {
+  source = "../../modules/storage-bucket"
+
+  name     = var.storage_bucket_name
+  location = local.storage_bucket_location
+}
+
+module "default_node_pool" {
+  source = "../../modules/node-pool"
+
+  cluster         = module.cluster.cluster
+  name            = "default"
+  service_account = module.common.cluster_service_account
+  machine_type    = "e2-standard-2"
+  max_node_count  = 2
+}
+
+module "spot_node_pool" {
+  source = "../../modules/node-pool"
+
+  cluster         = module.cluster.cluster
+  name            = "spot"
+  service_account = module.common.cluster_service_account
+  machine_type    = "c2-standard-4"
+  max_node_count  = 20
+  spot            = true
+}
+```
+
+```terraform variables.tf
+variable "name" {
+  description = "Name of the Duchy."
+  type        = string
+}
+
+variable "storage_bucket_name" {
+  description = "Name of Google Cloud Storage bucket."
+  type        = string
+}
+
+variable "spanner_instance_config" {
+  description = "Google Cloud Spanner instance configuration."
+  type        = string
+  default     = "regional-us-central1"
+}
+```
+</CodeGroup>
+
+## EKS Configuration Examples
+
+### Duchy on EKS
+
+The Duchy example creates:
+
+- **VPC** with multi-AZ subnets (public, private, database, intra)
+- **EKS Cluster** (v1.29) with managed node groups
+- **RDS PostgreSQL** instance for computation storage
+- **S3 Bucket** for blob storage
+- **Load Balancer Controller** for service exposure
+
+<CodeGroup>
+```terraform VPC Configuration
+locals {
+  az_count = 2
+  azs      = slice(data.aws_availability_zones.available.names, 0, local.az_count)
+  vpc_cidr = "10.0.0.0/16"
+}
+
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.1.1"
+
+  name = var.vpc_name
+  cidr = local.vpc_cidr
+
+  azs              = local.azs
+  private_subnets  = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 4)]
+  public_subnets   = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 8)]
+  database_subnets = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 12)]
+  intra_subnets    = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 16)]
+
+  create_database_subnet_group = true
+  enable_nat_gateway           = true
+  single_nat_gateway           = true
+}
+```
+
+```terraform EKS Cluster
+module "cluster" {
+  source = "../../modules/eks-cluster"
+
+  aws_region               = var.aws_region
+  cluster_name             = var.duchy_name
+  cluster_version          = "1.29"
+  control_plane_subnet_ids = module.vpc.intra_subnets
+  subnet_ids               = module.vpc.private_subnets
+  vpc_id                   = module.vpc.vpc_id
+  
+  default_instance_types   = ["m5.large"]
+  default_max_node_count   = 2
+  high_perf_instance_types = ["c5.xlarge"]
+  high_perf_max_node_count = 20
+}
+```
+
+```terraform RDS PostgreSQL
+module "postgres" {
+  source = "../../modules/rds-postgres"
+
+  name              = var.postgres_instance_name
+  subnet_group_name = module.vpc.database_subnet_group
+  vpc_cidr_block    = module.vpc.vpc_cidr_block
+  vpc_id            = module.vpc.vpc_id
+  instance_class    = var.postgres_instance_tier
+}
+```
+
+```terraform S3 Storage
+module "storage" {
+  source = "../../modules/s3-bucket"
+
+  bucket_name = var.bucket_name
+}
+```
+</CodeGroup>
+
+## Variable Configuration
+
+Customize deployments using variables:
+
+<CodeGroup>
+```terraform GKE terraform.tfvars
+cluster_name              = "kingdom"
+cluster_location          = "us-central1-a"
+cluster_release_channel   = "REGULAR"
+spanner_instance_name     = "halo-cmms"
+spanner_instance_config   = "regional-us-central1"
+key_ring_name             = "halo-cmms"
+```
+
+```terraform EKS terraform.tfvars
+aws_region              = "us-west-2"
+duchy_name              = "worker2-duchy"
+vpc_name                = "halo-worker2-vpc"
+bucket_name             = "halo-worker2-storage"
+postgres_instance_name  = "worker2-postgres"
+postgres_instance_tier  = "db.t3.medium"
+```
+</CodeGroup>
+
+## State Management
+
+### Remote State Best Practices
+
+<Steps>
+  <Step title="Use Remote Backend">
+    Always use remote state storage (GCS or S3) for production deployments.
+  </Step>
+
+  <Step title="Enable State Locking">
+    <CodeGroup>
+    ```terraform GCS (built-in locking)
+    terraform {
+      backend "gcs" {
+        bucket = "my-state-bucket"
+        prefix = "terraform/state"
+      }
+    }
+    ```
+
+    ```terraform S3 with DynamoDB locking
+    terraform {
+      backend "s3" {
+        bucket         = "my-state-bucket"
+        key            = "terraform.tfstate"
+        region         = "us-west-2"
+        dynamodb_table = "terraform-locks"
+        encrypt        = true
+      }
+    }
+    ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Secure State Files">
+    - Enable encryption at rest
+    - Restrict bucket access with IAM policies
+    - Enable versioning for state history
+  </Step>
+</Steps>
+
+## Multi-Environment Management
+
+Manage multiple environments (dev, staging, prod) using workspaces or separate state files:
+
+### Using Terraform Workspaces
+
+```bash
+# Create and switch to workspace
+terraform workspace new staging
+terraform workspace select staging
+
+# Apply configuration
+terraform apply -var-file=staging.tfvars
+```
+
+### Using Separate Directories
+
+```
+terraform/
+├── modules/
+├── environments/
+│   ├── dev/
+│   │   ├── backend.tf
+│   │   ├── main.tf
+│   │   └── terraform.tfvars
+│   ├── staging/
+│   │   ├── backend.tf
+│   │   ├── main.tf
+│   │   └── terraform.tfvars
+│   └── prod/
+│       ├── backend.tf
+│       ├── main.tf
+│       └── terraform.tfvars
+```
+
+## Common Operations
+
+### Plan Changes
+
+```bash
+# Review changes before applying
+terraform plan -out=tfplan
+
+# Apply the plan
+terraform apply tfplan
+```
+
+### Import Existing Resources
+
+```bash
+# Import existing GKE cluster
+terraform import module.kingdom_cluster.google_container_cluster.cluster projects/my-project/locations/us-central1/clusters/kingdom
+
+# Import existing EKS cluster
+terraform import module.cluster.aws_eks_cluster.cluster kingdom
+```
+
+### Destroy Resources
+
+```bash
+# Destroy specific resources
+terraform destroy -target=module.spot_node_pool
+
+# Destroy all resources (use with caution!)
+terraform destroy
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="State Lock Issues">
+    If state is locked:
+
+    ```bash
+    # Force unlock (use only if you're sure no one else is running terraform)
+    terraform force-unlock LOCK_ID
+    ```
+  </Accordion>
+
+  <Accordion title="Provider Version Conflicts">
+    Pin provider versions in `versions.tf`:
+
+    ```terraform
+    terraform {
+      required_version = ">= 1.0"
+      
+      required_providers {
+        google = {
+          source  = "hashicorp/google"
+          version = "~> 5.0"
+        }
+        aws = {
+          source  = "hashicorp/aws"
+          version = "~> 5.0"
+        }
+      }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Quota Exceeded Errors">
+    Request quota increases in cloud console:
+    - GKE: Increase CPU, IP address quotas
+    - EKS: Increase VPC, Elastic IP quotas
+  </Accordion>
+</AccordionGroup>
+
+## Security Best Practices
+
+<Steps>
+  <Step title="Encrypt State Files">
+    Enable encryption for state storage buckets.
+  </Step>
+
+  <Step title="Restrict IAM Permissions">
+    Use least-privilege IAM policies for Terraform service accounts.
+  </Step>
+
+  <Step title="Never Commit Secrets">
+    - Add `*.tfvars` to `.gitignore`
+    - Use secret management services
+    - Reference secrets via data sources
+
+    ```terraform
+    data "google_secret_manager_secret_version" "api_key" {
+      secret = "api-key"
+    }
+    ```
+  </Step>
+
+  <Step title="Review Plan Output">
+    Always review `terraform plan` output before applying, especially for production.
+  </Step>
+</Steps>
+
+## Advanced Patterns
+
+### Using Data Sources
+
+Reference existing resources:
+
+```terraform
+data "google_compute_network" "default" {
+  name = "default"
+}
+
+data "aws_vpc" "existing" {
+  tags = {
+    Name = "production-vpc"
+  }
+}
+```
+
+### Dynamic Blocks
+
+Generate repeated configuration:
+
+```terraform
+dynamic "node_pool" {
+  for_each = var.node_pools
+  content {
+    name       = node_pool.value.name
+    node_count = node_pool.value.count
+    
+    node_config {
+      machine_type = node_pool.value.machine_type
+    }
+  }
+}
+```
+
+### Module Composition
+
+Build complex infrastructure from simple modules:
+
+```terraform
+module "base_network" {
+  source = "./modules/network"
+}
+
+module "kingdom" {
+  source = "./modules/kingdom"
+  
+  network_id = module.base_network.network_id
+}
+
+module "duchy" {
+  source = "./modules/duchy"
+  
+  network_id = module.base_network.network_id
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Deploy Kingdom" icon="crown" href="/deployment/kingdom-gke">
+    Use Terraform to deploy Kingdom infrastructure
+  </Card>
+  <Card title="Deploy Duchy" icon="server" href="/deployment/duchy-gke">
+    Use Terraform to deploy Duchy infrastructure
+  </Card>
+  <Card title="Terraform Docs" icon="book" href="https://developer.hashicorp.com/terraform/docs">
+    Official Terraform documentation
+  </Card>
+  <Card title="GKE Modules" icon="google" href="https://registry.terraform.io/providers/hashicorp/google/latest/docs">
+    Google Cloud provider documentation
+  </Card>
+</CardGroup>

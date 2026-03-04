@@ -1,0 +1,553 @@
+---
+title: Monitoring and Observability
+description: Set up monitoring, metrics, logging, and alerting for Kingdom and Duchy deployments using OpenTelemetry and Google Cloud
+---
+
+Learn how to deploy comprehensive monitoring and observability for your Halo CMMS deployments using OpenTelemetry, Google Cloud Monitoring, and Cloud Trace.
+
+## Overview
+
+The Halo CMMS supports observability through:
+
+- **OpenTelemetry** for metrics and traces collection
+- **Google Cloud Monitoring** for metrics visualization and alerting
+- **Google Cloud Trace** for distributed tracing
+- **Automatic Java instrumentation** for JVM metrics and RPC monitoring
+- **Custom Halo metrics** for CMMS-specific operations
+
+## Architecture
+
+The monitoring setup consists of:
+
+1. **OpenTelemetry Java Agent** - Automatically instruments JVM applications
+2. **OpenTelemetry Collector** - Receives, processes, and exports telemetry data
+3. **OpenTelemetry Operator** - Manages collector deployment and instrumentation injection
+4. **Google Cloud Services** - Stores and visualizes metrics and traces
+
+## Prerequisites
+
+<Note>
+**Before you start:**
+
+- Deploy a Halo component (Kingdom, Duchy, or Reporting Server)
+- See: [Kingdom Deployment](/deployment/kingdom-gke) or [Duchy Deployment](/deployment/duchy-gke)
+- Have `kubectl` configured for your cluster
+- Have appropriate Google Cloud permissions
+</Note>
+
+## Google Cloud Configuration
+
+<Steps>
+
+<Step title="Enable required APIs">
+
+Enable Cloud Monitoring and Cloud Trace APIs from the [APIs and Services](https://console.cloud.google.com/apis) page:
+
+```bash
+gcloud services enable monitoring.googleapis.com
+gcloud services enable cloudtrace.googleapis.com
+```
+
+</Step>
+
+<Step title="Create service account">
+
+Create an IAM service account for OpenTelemetry with Workload Identity:
+
+```bash
+# Create service account
+gcloud iam service-accounts create open-telemetry \
+  --display-name="OpenTelemetry Collector"
+
+# Grant monitoring and trace permissions
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:open-telemetry@PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/monitoring.metricWriter"
+
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:open-telemetry@PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/cloudtrace.agent"
+```
+
+</Step>
+
+<Step title="Configure Workload Identity">
+
+Bind the Kubernetes service account to the Google Cloud service account:
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding \
+  open-telemetry@PROJECT_ID.iam.gserviceaccount.com \
+  --role roles/iam.workloadIdentityUser \
+  --member "serviceAccount:PROJECT_ID.svc.id.goog[default/open-telemetry]"
+```
+
+</Step>
+
+</Steps>
+
+## OpenTelemetry Deployment
+
+### Install cert-manager
+
+The OpenTelemetry Operator requires cert-manager for webhook certificates.
+
+<Warning>
+**Version Compatibility**
+
+Ensure cert-manager, OpenTelemetry Operator, and collector image versions are compatible. See the [Compatibility Matrix](https://github.com/open-telemetry/opentelemetry-operator#compatibility-matrix).
+
+Recommended versions:
+- cert-manager: v1.18.2
+- OpenTelemetry Operator: v0.129.1
+- Collector image: Specified in the Halo configuration
+</Warning>
+
+```bash
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.18.2/cert-manager.yaml
+```
+
+### Install OpenTelemetry Operator
+
+Deploy the OpenTelemetry Operator:
+
+```bash
+kubectl apply -f https://github.com/open-telemetry/opentelemetry-operator/releases/download/v0.129.1/opentelemetry-operator.yaml
+```
+
+Verify the operator is running:
+
+```bash
+kubectl get pods -n opentelemetry-operator-system
+```
+
+### Create OpenTelemetry Configuration
+
+The Halo [`dev` environment](https://github.com/world-federation-of-advertisers/cross-media-measurement/tree/main/src/main/k8s/dev) provides reference configurations:
+
+- [`open_telemetry_gke.cue`](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/src/main/k8s/dev/open_telemetry_gke.cue) - GKE-specific configuration
+- [`open_telemetry.cue`](https://github.com/world-federation-of-advertisers/cross-media-measurement/blob/main/src/main/k8s/open_telemetry.cue) - Base configuration
+
+<Steps>
+
+<Step title="Generate configuration from CUE (optional)">
+
+If using the Halo CUE-based configuration:
+
+```bash
+bazel build //src/main/k8s/dev:open_telemetry_gke
+```
+
+The generated YAML will be in `bazel-bin/src/main/k8s/dev/`.
+
+</Step>
+
+<Step title="Customize configuration">
+
+Customize the generated or reference configuration for your environment:
+
+```yaml
+apiVersion: opentelemetry.io/v1alpha1
+kind: OpenTelemetryCollector
+metadata:
+  name: default
+spec:
+  mode: deployment
+  serviceAccount: open-telemetry
+  config: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+          http:
+    
+    processors:
+      batch:
+    
+    exporters:
+      googlecloud:
+        project: YOUR_PROJECT_ID
+    
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [googlecloud]
+        metrics:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [googlecloud]
+```
+
+</Step>
+
+<Step title="Apply configuration">
+
+Apply the OpenTelemetry configuration:
+
+```bash
+kubectl apply -f opentelemetry-config.yaml
+```
+
+Verify the collector is running:
+
+```bash
+kubectl get pods -l app.kubernetes.io/component=opentelemetry-collector
+kubectl logs -l app.kubernetes.io/component=opentelemetry-collector
+```
+
+</Step>
+
+</Steps>
+
+## Enable Instrumentation
+
+The OpenTelemetry Operator can automatically inject the Java agent into your pods.
+
+### Create Instrumentation Resource
+
+```yaml
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: open-telemetry-java-agent
+spec:
+  exporter:
+    endpoint: http://default-collector:4317
+  propagators:
+    - tracecontext
+    - baggage
+  sampler:
+    type: parentbased_traceidratio
+    argument: "1.0"
+```
+
+Apply the instrumentation:
+
+```bash
+kubectl apply -f instrumentation.yaml
+```
+
+### Annotate Deployments
+
+Add the instrumentation annotation to your pod specifications:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kingdom-v2alpha-public-api-server
+spec:
+  template:
+    metadata:
+      annotations:
+        instrumentation.opentelemetry.io/inject-java: "open-telemetry-java-agent"
+    spec:
+      # ... rest of pod spec
+```
+
+### Restart Deployments
+
+Restart all deployments to pick up the Java agent instrumentation:
+
+```bash
+for deployment in $(kubectl get deployments -o name); do 
+  kubectl rollout restart $deployment
+done
+```
+
+Verify instrumentation is active:
+
+```bash
+# Check for JAVA_TOOL_OPTIONS environment variable
+kubectl get pods -o jsonpath='{.items[0].spec.containers[0].env[?(@.name=="JAVA_TOOL_OPTIONS")]}'
+```
+
+## Available Metrics
+
+Metrics are visible in Google Cloud Monitoring under the **Workload** domain.
+
+### Automatic Java Instrumentation Metrics
+
+<Accordion title="JVM Metrics">
+
+**Class Loading:**
+- `jvm.class.count` - Current number of loaded classes
+- `jvm.class.loaded` - Total number of classes loaded since JVM start
+- `jvm.class.unloaded` - Total number of classes unloaded since JVM start
+
+**CPU:**
+- `jvm.cpu.count` - Number of available processors
+- `jvm.cpu.recent_utilization` - Recent CPU utilization
+- `jvm.cpu.time` - CPU time used by the JVM
+
+**Memory:**
+- `jvm.memory.committed` - Amount of memory committed for JVM to use
+- `jvm.memory.limit` - Maximum amount of memory available
+- `jvm.memory.used` - Amount of memory currently used
+- `jvm.memory.used_after_last_gc` - Memory used after last garbage collection
+
+**Garbage Collection:**
+- `jvm.gc.duration` - Time spent in garbage collection
+
+**Threads:**
+- `jvm.thread.count` - Current number of threads
+
+</Accordion>
+
+<Accordion title="RPC Metrics">
+
+**Client-side:**
+- `rpc.client.duration` - Duration of RPC client requests
+
+**Server-side:**
+- `rpc.server.duration` - Duration of RPC server requests
+
+These metrics include labels for:
+- RPC method
+- Status code
+- Target service
+
+</Accordion>
+
+### Halo Custom Metrics
+
+<Accordion title="CMMS-Specific Metrics">
+
+**Thread Pool:**
+- `halo_cmm.thread_pool.size` - Thread pool size
+- `halo_cmm.thread_pool.active_count` - Number of active threads
+
+**Computation:**
+- `halo_cmm.computation.stage.crypto.cpu.time` - CPU time spent in cryptographic operations
+- `halo_cmm.computation.stage.crypto.time` - Wall-clock time for cryptographic operations
+- `halo_cmm.computation.stage.time` - Total time for computation stages
+
+**Retention:**
+- `halo_cmm.retention.deleted_measurements` - Number of measurements deleted by retention policies
+- `halo_cmm.retention.deleted_exchanges` - Number of exchanges deleted by retention policies
+- `halo_cmm.retention.cancelled_measurements` - Number of measurements cancelled by retention policies
+
+</Accordion>
+
+## Health Checks and Diagnostics
+
+### Collector Health
+
+Check OpenTelemetry Collector health:
+
+```bash
+# Collector pods
+kubectl get pods -l app.kubernetes.io/component=opentelemetry-collector
+
+# Collector logs
+kubectl logs -l app.kubernetes.io/component=opentelemetry-collector --tail=100
+
+# Check for export errors
+kubectl logs -l app.kubernetes.io/component=opentelemetry-collector | grep -i error
+```
+
+### Verify Metrics Export
+
+Check if metrics are reaching Google Cloud Monitoring:
+
+```bash
+# Using gcloud
+gcloud monitoring time-series list \
+  --filter='metric.type=starts_with("workload.googleapis.com")' \
+  --limit=10
+```
+
+Or visit the [Metrics Explorer](https://console.cloud.google.com/monitoring/metrics-explorer) in Google Cloud Console.
+
+### Verify Traces Export
+
+Check if traces are reaching Google Cloud Trace:
+
+Visit [Cloud Trace](https://console.cloud.google.com/traces) in Google Cloud Console to see trace data.
+
+## Creating Dashboards
+
+<Steps>
+
+<Step title="Navigate to Monitoring">
+
+Go to [Google Cloud Monitoring](https://console.cloud.google.com/monitoring) in the Cloud Console.
+
+</Step>
+
+<Step title="Create dashboard">
+
+Click **Dashboards** → **Create Dashboard**
+
+</Step>
+
+<Step title="Add charts">
+
+Add charts for key metrics:
+
+**Example: JVM Memory Usage**
+```
+Resource Type: Kubernetes Container
+Metric: workload.googleapis.com/jvm.memory.used
+Filter: cluster_name = "your-cluster"
+Grouping: container_name
+```
+
+**Example: RPC Request Duration**
+```
+Resource Type: Kubernetes Container
+Metric: workload.googleapis.com/rpc.server.duration
+Aggregator: 95th percentile
+Filter: cluster_name = "your-cluster"
+```
+
+**Example: Computation Stage Time**
+```
+Resource Type: Kubernetes Container  
+Metric: workload.googleapis.com/halo_cmm.computation.stage.time
+Filter: cluster_name = "your-cluster"
+Grouping: stage_name
+```
+
+</Step>
+
+</Steps>
+
+## Setting Up Alerts
+
+<Steps>
+
+<Step title="Create alert policy">
+
+Navigate to **Monitoring** → **Alerting** → **Create Policy**
+
+</Step>
+
+<Step title="Configure conditions">
+
+Example alert conditions:
+
+**High Memory Usage:**
+```
+Metric: workload.googleapis.com/jvm.memory.used
+Condition: Above threshold
+Threshold: 1.5 GB
+Duration: 5 minutes
+```
+
+**High RPC Error Rate:**
+```
+Metric: workload.googleapis.com/rpc.server.duration
+Filter: rpc.grpc.status_code != "OK"
+Condition: Rate of change
+Threshold: > 10 errors/minute
+```
+
+**Pod Restart Rate:**
+```
+Metric: kubernetes.io/container/restart_count
+Condition: Rate of change
+Threshold: > 5 restarts in 10 minutes
+```
+
+</Step>
+
+<Step title="Configure notifications">
+
+Set up notification channels:
+- Email
+- Slack
+- PagerDuty
+- SMS
+
+</Step>
+
+</Steps>
+
+## Troubleshooting
+
+<Accordion title="Metrics not appearing in Cloud Monitoring">
+
+**Check collector status:**
+```bash
+kubectl logs -l app.kubernetes.io/component=opentelemetry-collector
+```
+
+**Verify service account permissions:**
+```bash
+gcloud projects get-iam-policy PROJECT_ID \
+  --flatten="bindings[].members" \
+  --filter="bindings.members:open-telemetry@PROJECT_ID.iam.gserviceaccount.com"
+```
+
+**Check Workload Identity binding:**
+```bash
+kubectl describe sa open-telemetry
+```
+
+Look for the `iam.gke.io/gcp-service-account` annotation.
+
+</Accordion>
+
+<Accordion title="Instrumentation not injected">
+
+**Verify Instrumentation resource:**
+```bash
+kubectl get instrumentation
+kubectl describe instrumentation open-telemetry-java-agent
+```
+
+**Check pod annotations:**
+```bash
+kubectl get pod <pod-name> -o jsonpath='{.metadata.annotations}'
+```
+
+**Check operator logs:**
+```bash
+kubectl logs -n opentelemetry-operator-system -l app.kubernetes.io/name=opentelemetry-operator
+```
+
+</Accordion>
+
+<Accordion title="High cardinality warnings">
+
+If you see warnings about high cardinality metrics:
+
+1. Review metric labels and reduce unnecessary dimensions
+2. Use metric filtering in the collector configuration
+3. Aggregate metrics before export
+4. Consider sampling high-volume metrics
+
+</Accordion>
+
+## Best Practices
+
+<Note>
+**Monitoring Strategy**
+
+- Monitor both infrastructure (Kubernetes) and application (Halo) metrics
+- Set up alerts for critical issues (OOM, high error rates, pod crashes)
+- Create dashboards for different audiences (operators, developers, business)
+- Regularly review and update alert thresholds
+- Use distributed tracing to debug complex multi-service issues
+</Note>
+
+<Warning>
+**Cost Management**
+
+- Monitor Google Cloud Monitoring costs in the [Billing](https://console.cloud.google.com/billing) console
+- Adjust metric retention periods based on needs
+- Use metric filtering to reduce exported metrics
+- Consider sampling for high-volume traces
+- Archive old metrics to Cloud Storage if needed
+</Warning>
+
+## Additional Resources
+
+- [OpenTelemetry Documentation](https://opentelemetry.io/docs/)
+- [Google Cloud Monitoring](https://cloud.google.com/monitoring/docs)
+- [Google Cloud Trace](https://cloud.google.com/trace/docs)
+- [OpenTelemetry Operator](https://github.com/open-telemetry/opentelemetry-operator)
+- [Halo Metrics Configuration](https://github.com/world-federation-of-advertisers/cross-media-measurement/tree/main/src/main/k8s)

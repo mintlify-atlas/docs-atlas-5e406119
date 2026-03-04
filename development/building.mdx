@@ -1,0 +1,174 @@
+---
+title: Building the System
+description: Build the Halo measurement system using Bazel
+---
+
+The Halo measurement system is built using [Bazel](https://www.bazel.build/). The resulting container images are designed to run in [Kubernetes](https://kubernetes.io/) clusters.
+
+## Requirements
+
+Your build environment must have the following components:
+
+<CardGroup cols={2}>
+  <Card title="Bazel" icon="cube">
+    Version 7.7.1 (see `.bazelversion`)
+  </Card>
+  <Card title="Operating System" icon="linux">
+    GNU/Linux with x86-64 architecture
+  </Card>
+  <Card title="Clang" icon="code">
+    Required for C++ compilation
+  </Card>
+  <Card title="SWIG" icon="wrench">
+    Interface generation tool
+  </Card>
+</CardGroup>
+
+<Note>
+  Some image targets require building with glibc ≤ 2.36. Known compatible platforms include Debian Bookworm and Ubuntu 22.04.
+</Note>
+
+### Additional Dependencies
+
+- **Bash** - Shell scripting
+- **OpenSSL 1.1.1+** - Cryptographic operations
+
+All executable dependencies must be in your `$PATH`.
+
+## Quick Start
+
+<Steps>
+  <Step title="Run all tests">
+    Verify your environment is set up correctly:
+    
+    ```bash
+    bazel test //src/test/...
+    ```
+  </Step>
+  
+  <Step title="Specify host platform">
+    Some targets require explicit platform specification:
+    
+    ```bash
+    bazel build --host_platform=//build/platforms:ubuntu_22_04 //your/target
+    ```
+    
+    Compatible platforms are defined in `//build/platforms/BUILD.bazel`.
+  </Step>
+</Steps>
+
+<Tip>
+  Bazel cannot auto-detect glibc versions, so you must explicitly specify the `--host_platform` option for targets requiring glibc ≤ 2.36.
+</Tip>
+
+## Make Variables
+
+Some build targets use ["Make" variables](https://docs.bazel.build/versions/4.2.2/be/make-variables.html) defined via the `--define` option. These can be set on the command line or in `.bazelrc`.
+
+```bash
+bazel build --define=variable_name=value //your/target
+```
+
+Variable definitions are located in `build/variables.bzl`.
+
+## Containerized Builds
+
+If your host machine doesn't meet the requirements, use the containerized build environment.
+
+### Using the Container Script
+
+The `ghcr.io/world-federation-of-advertisers/bazel` container image provides a complete build environment. Use the `tools/bazel-container` script as a drop-in replacement for the `bazel` command:
+
+<CodeGroup>
+```bash Run Tests
+tools/bazel-container test //src/test/...
+```
+
+```bash Build Target
+tools/bazel-container build //your/target
+```
+</CodeGroup>
+
+<Note>
+  The `tools/bazel-container` script automatically specifies the appropriate host platform, so you should **not** use the `--host_platform` option when using it.
+</Note>
+
+### Interactive Container Shell
+
+For extensive development work, you can run a shell inside the container:
+
+```bash
+docker run -it --rm \
+  -v "$PWD":/workspace \
+  -w /workspace \
+  ghcr.io/world-federation-of-advertisers/bazel \
+  /bin/bash
+```
+
+You can even install IntelliJ IDEA inside the container and use X11 forwarding to access it from your host.
+
+### TestContainer-based Tests
+
+Running tests that use TestContainers inside Docker requires additional setup:
+
+- Follow the [sibling Docker containers pattern](https://www.testcontainers.org/supported_docker_environment/continuous_integration/dind_patterns/)
+- Set `TESTCONTAINERS_RYUK_DISABLED=true` environment variable
+
+The `tools/bazel-container` script handles these configurations automatically.
+
+## Hybrid Development
+
+If your host has a newer glibc version but meets other requirements, you can develop locally and use the container only for building/deploying images.
+
+### Running Container-Built Targets on Host
+
+On Linux, the `tools/bazel-container` script writes output to `bazel-container-output` in your working directory. Use the `tools/bazel-container-run` script to generate executable scripts:
+
+```bash
+tools/bazel-container-run //your/target
+```
+
+This creates a script you can execute on your host machine.
+
+## Build Targets
+
+<CardGroup cols={2}>
+  <Card title="Test All" icon="vial">
+    ```bash
+    bazel test //src/test/...
+    ```
+  </Card>
+  
+  <Card title="Build Images" icon="box">
+    ```bash
+    bazel build //path/to:image_target
+    ```
+  </Card>
+  
+  <Card title="Run Target" icon="play">
+    ```bash
+    bazel run //path/to:target
+    ```
+  </Card>
+  
+  <Card title="Container Build" icon="docker">
+    ```bash
+    tools/bazel-container build //target
+    ```
+  </Card>
+</CardGroup>
+
+## Local Kubernetes
+
+You can deploy a minimal testing environment in a local Kubernetes cluster for development and testing purposes.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Testing" icon="flask" href="./testing">
+    Learn how to run and organize tests
+  </Card>
+  <Card title="IntelliJ Setup" icon="code" href="./intellij-setup">
+    Configure your IDE for development
+  </Card>
+</CardGroup>

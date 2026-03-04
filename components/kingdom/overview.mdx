@@ -1,0 +1,198 @@
+---
+title: Kingdom Overview
+description: Understanding the Kingdom component in Halo Cross-Media Measurement
+---
+
+The **Kingdom** is the central orchestrator and aggregation point in the Halo Cross-Media Measurement System. It coordinates cross-media measurement campaigns and manages the lifecycle of measurement computations across multiple duchies.
+
+## Role in the System
+
+The Kingdom serves as the trusted central authority that:
+
+- **Coordinates Multi-Party Computations (MPC)**: Orchestrates secure computation protocols across multiple duchies to compute aggregate measurements while preserving privacy
+- **Manages Measurement Lifecycle**: Tracks measurements from creation through completion, including state transitions and participant coordination
+- **Provides Public APIs**: Exposes APIs for Measurement Consumers (publishers/advertisers) and Event Data Providers (EDPs) to create and manage measurements
+- **Maintains System Metadata**: Stores information about participants, certificates, data providers, and measurement consumers
+
+<Note>
+The Kingdom does not have access to raw user-level data. All computations happen at the Duchy level using secure multi-party computation protocols.
+</Note>
+
+## Architecture
+
+The Kingdom architecture consists of three main layers:
+
+<CardGroup cols={3}>
+  <Card title="Data Layer" icon="database">
+    Google Cloud Spanner for distributed, consistent storage of system state
+  </Card>
+  <Card title="Internal API" icon="server">
+    Kingdom Data Server providing internal services to system components
+  </Card>
+  <Card title="External APIs" icon="globe">
+    Public and System API servers exposing functionality to external clients
+  </Card>
+</CardGroup>
+
+### Key Architectural Components
+
+#### Database (Spanner)
+
+The Kingdom uses **Google Cloud Spanner** as its primary data store, configured via the `_spannerConfig` in the Kubernetes deployment:
+
+- **Global Distribution**: Spanner provides globally distributed, horizontally scalable storage
+- **Strong Consistency**: ACID transactions ensure data consistency across all operations
+- **Schema Management**: Automatic schema updates via init containers in deployments
+
+**Key Data Models:**
+- Measurements and their state transitions
+- Requisitions (data requests to EDPs)
+- Participants (Measurement Consumers, Data Providers, Duchies)
+- Certificates and authentication credentials
+- Event Groups and metadata descriptors
+- Model providers, lines, and releases
+- Panel exchange workflows
+
+#### Storage Infrastructure
+
+Beyond Spanner, the Kingdom relies on:
+
+- **Certificate Storage**: TLS certificates and keys for secure communication
+- **Configuration Storage**: Protocol configurations, duchy information, and metadata type definitions
+- **Secret Management**: Kubernetes secrets for sensitive credentials
+
+## Responsibilities
+
+### Measurement Orchestration
+
+1. **Measurement Creation**: Accept measurement requests from Measurement Consumers
+2. **Requisition Generation**: Create data requisitions for Event Data Providers
+3. **Duchy Coordination**: Assign computation participants and track their readiness
+4. **State Management**: Transition measurements through states (PENDING → COMPUTING → SUCCEEDED/FAILED)
+5. **Result Aggregation**: Collect and return final measurement results
+
+### Participant Management
+
+<Accordion title="Measurement Consumers">
+  Organizations (advertisers, publishers) that request cross-media measurements. The Kingdom manages their accounts, API keys, certificates, and measurement requests.
+</Accordion>
+
+<Accordion title="Event Data Providers (EDPs)">
+  Organizations that provide event-level data for measurements. The Kingdom tracks their event groups, data availability, and requisition fulfillment.
+</Accordion>
+
+<Accordion title="Duchies">
+  Computational nodes that perform secure multi-party computation. The Kingdom coordinates their participation and tracks computation progress.
+</Accordion>
+
+### API Services
+
+The Kingdom exposes multiple API surfaces:
+
+**Public API (v2alpha)**: For external clients (Measurement Consumers, EDPs)
+- Create and manage measurements
+- Register data providers and event groups
+- Manage certificates and API keys
+- Track measurement status
+
+**System API**: For internal system components (Duchies, simulators)
+- Report computation progress
+- Coordinate multi-party protocols
+- Access system-level resources
+
+**Internal API**: For Kingdom internal services
+- Direct database operations
+- Background job processing
+- Internal state management
+
+## Service Architecture
+
+The Kingdom is deployed as multiple cooperating services:
+
+```
+┌─────────────────────────────────────────────────────┐
+│              External Clients                        │
+│  (Measurement Consumers, EDPs, Duchies)             │
+└──────────────┬──────────────────┬───────────────────┘
+               │                  │
+               ▼                  ▼
+    ┌──────────────────┐  ┌─────────────────────┐
+    │ v2alpha Public   │  │  System API         │
+    │ API Server       │  │  Server             │
+    └────────┬─────────┘  └──────────┬──────────┘
+             │                       │
+             ▼                       ▼
+       ┌──────────────────────────────────────┐
+       │    GCP Kingdom Data Server           │
+       │    (Internal API)                    │
+       └─────────────┬────────────────────────┘
+                     │
+                     ▼
+            ┌─────────────────┐
+            │ Cloud Spanner   │
+            │ (Database)      │
+            └─────────────────┘
+```
+
+### Communication Security
+
+All Kingdom services communicate using:
+- **Mutual TLS (mTLS)**: Certificate-based authentication for all gRPC connections
+- **Certificate Validation**: Authority Key Identifier (AKID) to principal mapping
+- **Encrypted Channels**: TLS 1.3 for all network communication
+
+## Deployment Configuration
+
+The Kingdom deployment is defined in `src/main/k8s/kingdom.cue` with three main services:
+
+- **gcp-kingdom-data-server**: Internal API server (port 8443)
+- **system-api-server**: System API for duchies and internal components (port 8443) 
+- **v2alpha-public-api-server**: Public API for external clients (port 8443)
+
+Each service includes:
+- Health checks on port 8080
+- Automatic schema migrations via init containers
+- ConfigMap and Secret volume mounts for configuration
+- Network policies restricting access
+
+## Background Jobs
+
+The Kingdom runs scheduled maintenance tasks:
+
+- **Completed Measurements Deletion**: Removes old completed measurements (hourly at :15)
+- **Pending Measurements Cancellation**: Cancels stale pending measurements (hourly at :45)
+- **Exchanges Deletion**: Cleans up old panel exchange data (daily at 6:40 AM)
+
+See [Kingdom Daemons](/components/kingdom/daemons) for details.
+
+## Supported Protocols
+
+The Kingdom supports multiple secure computation protocols:
+
+<CardGroup cols={2}>
+  <Card title="Liquid Legions V2" icon="shield">
+    Primary MPC protocol for reach and frequency measurements
+  </Card>
+  <Card title="Reach-Only Liquid Legions V2" icon="chart-simple">
+    Optimized protocol for reach-only measurements
+  </Card>
+  <Card title="Honest Majority Share Shuffle" icon="shuffle">
+    Alternative protocol with different security assumptions
+  </Card>
+  <Card title="TrusTee" icon="lock">
+    Trusted execution environment-based protocol
+  </Card>
+</CardGroup>
+
+Protocol configurations are stored as textproto files and mounted into services via ConfigMaps.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Kingdom Services" icon="gears" href="/components/kingdom/services">
+    Learn about individual Kingdom services and their APIs
+  </Card>
+  <Card title="Kingdom Daemons" icon="clock" href="/components/kingdom/daemons">
+    Understand background jobs and scheduled tasks
+  </Card>
+</CardGroup>

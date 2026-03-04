@@ -1,0 +1,463 @@
+---
+title: EDP Aggregator
+description: Event Data Provider Aggregator for managing encrypted event data
+---
+
+The **EDP Aggregator** is a component that helps Event Data Providers (EDPs) manage and aggregate event data for cross-media measurements. It provides services for synchronizing event metadata, managing data availability, and coordinating requisition fulfillment.
+
+## Purpose
+
+The EDP Aggregator serves as a middleware layer between:
+
+- **EDPs**: Organizations with event-level user data (publishers, advertisers, platforms)
+- **Kingdom**: Central orchestration system managing measurements
+- **Duchies**: Computational nodes that process encrypted event data
+
+<CardGroup cols={2}>
+  <Card title="Event Group Sync" icon="sync">
+    Synchronize event group metadata with Kingdom
+  </Card>
+  <Card title="Data Availability" icon="database">
+    Track which event data is available for measurements
+  </Card>
+  <Card title="Requisition Processing" icon="file-invoice">
+    Coordinate fulfilling data requisitions from Duchies
+  </Card>
+  <Card title="Encrypted Storage" icon="lock">
+    Manage encrypted event data storage
+  </Card>
+</CardGroup>
+
+## Architecture
+
+The EDP Aggregator is deployed as multiple cooperating services:
+
+```
+┌──────────────────────────────────────────────────┐
+│                   Kingdom                            │
+│           (Public API & System API)                 │
+└─────────────────────┬────────────────────────────┘
+                       │
+                       ▼
+    ┌──────────────────────────────────────────────────┐
+    │              EDP Aggregator                      │
+    │                                                  │
+    │  ┌────────────────────────────────────────┐  │
+    │  │      System API Server                   │  │
+    │  │  (Exposed to Kingdom & Duchies)       │  │
+    │  └─────────────────┬────────────────────────┘  │
+    │                   │                             │
+    │                   ▼                             │
+    │  ┌────────────────────────────────────────┐  │
+    │  │     Internal API Server                 │  │
+    │  │   (Internal data operations)           │  │
+    │  └─────────────────┬───────────────────────┘  │
+    │                   │                             │
+    │                   ▼                             │
+    │            ┌─────────────────┐                │
+    │            │ Cloud Spanner   │                │
+    │            │ (Database)      │                │
+    │            └─────────────────┘                │
+    │                                                  │
+    │  ┌────────────────────────────────────────┐  │
+    │  │      Background Functions                │  │
+    │  │  - Event Group Sync                    │  │
+    │  │  - Data Availability Sync/Cleanup      │  │
+    │  │  - Requisition Fetcher                 │  │
+    │  └────────────────────────────────────────┘  │
+    └──────────────────────────────────────────────────┘
+                       │
+                       ▼
+            ┌───────────────────┐
+            │ Encrypted Event  │
+            │ Data Storage     │
+            └───────────────────┘
+```
+
+## Core Services
+
+### Internal API Server
+
+**Image**: `edp-aggregator/internal-api`  
+**Service Name**: `edp-aggregator-internal-api-server`  
+**Port**: 8443 (gRPC), 8080 (health)
+
+#### Purpose
+
+Provides internal gRPC services for managing EDP Aggregator state in Spanner:
+
+- **Impression Metadata**: Track encrypted event impressions
+- **Requisition Metadata**: Manage data requisition fulfillment
+- **Event Group Data**: Store event group configuration and status
+- **Data Availability**: Track which data is available for measurements
+
+#### Implementation
+
+Located in `src/main/kotlin/org/wfanet/measurement/edpaggregator/`:
+
+<Accordion title="Core Services">
+  Services for internal data management:
+  - `ImpressionMetadataService`: Manage impression data
+  - `RequisitionMetadataService`: Track requisition fulfillment
+  - Database schema management and migrations
+</Accordion>
+
+#### Spanner Integration
+
+Implemented in `deploy/gcloud/spanner/`:
+
+```kotlin
+// Spanner-backed services
+SpannerImpressionMetadataService
+SpannerRequisitionMetadataService
+```
+
+#### Configuration
+
+```bash
+--tls-cert-file=/etc/[app]/edp-aggregator/tls/tls.crt
+--tls-key-file=/etc/[app]/edp-aggregator/tls/tls.key
+--cert-collection-file=/etc/[app]/edp-aggregator/config/trusted_certs.pem
+--debug-verbose-grpc-server-logging=[true|false]
+```
+
+Plus Spanner configuration flags.
+
+#### Schema Management
+
+The Internal API Server deployment includes an init container:
+
+**Init Container**: `update-edp-aggregator-schema`
+
+Automatically runs database schema migrations before the server starts.
+
+### System API Server
+
+**Image**: `edp-aggregator/system-api`  
+**Service Name**: `edp-aggregator-system-api-server`  
+**Port**: 8443 (gRPC), 8080 (health)  
+**Type**: External Service
+
+#### Purpose
+
+Exposes the System API for Kingdom and Duchies to interact with the EDP Aggregator:
+
+- Query data availability for measurements
+- Request encrypted event data
+- Coordinate requisition fulfillment
+- Manage event group metadata
+
+#### Implementation
+
+**File**: `deploy/common/server/SystemApiServer.kt`
+
+#### Configuration
+
+```bash
+--tls-cert-file=/etc/[app]/edp-aggregator/tls/tls.crt
+--tls-key-file=/etc/[app]/edp-aggregator/tls/tls.key
+--cert-collection-file=/etc/[app]/edp-aggregator/config/trusted_certs.pem
+--edp-aggregator-internal-api-target=edp-aggregator-internal-api-server:8443
+--edp-aggregator-internal-api-cert-host=localhost
+--debug-verbose-grpc-client-logging=[true|false]
+--debug-verbose-grpc-server-logging=[true|false]
+```
+
+#### Network Policy
+
+The System API Server:
+- Accepts connections from Kingdom and Duchies
+- Connects to Internal API Server for data operations
+
+## Background Functions
+
+The EDP Aggregator includes several background functions, typically deployed as Google Cloud Functions or similar serverless components:
+
+### Event Group Sync
+
+**File**: `deploy/gcloud/eventgroups/EventGroupSyncFunction.kt`
+
+#### Purpose
+
+Synchronizes event group metadata between the EDP's data sources and the Kingdom:
+
+<Steps>
+  <Step title="Discovery">
+    Discover new or updated event groups in EDP systems
+  </Step>
+  <Step title="Registration">
+    Register event groups with Kingdom via Public API
+  </Step>
+  <Step title="Update">
+    Update event group metadata when changed
+  </Step>
+  <Step title="Status Tracking">
+    Track event group status and availability
+  </Step>
+</Steps>
+
+#### Scheduling
+
+Typically runs on a schedule (e.g., Cloud Scheduler):
+- Hourly or daily depending on event group change frequency
+- Triggered by events when new data arrives
+
+### Data Availability Sync
+
+**File**: `deploy/gcloud/dataavailability/DataAvailabilitySyncFunction.kt`
+
+**Implementation**: `dataavailability/DataAvailabilitySync.kt`
+
+#### Purpose
+
+Tracks which encrypted event data is available for measurements:
+
+- Scans encrypted event data storage
+- Updates data availability records in Spanner
+- Notifies Kingdom of newly available data
+- Tracks data readiness for requisition fulfillment
+
+#### Metrics
+
+**File**: `dataavailability/DataAvailabilitySyncMetrics.kt`
+
+Tracks:
+- Number of data availability records created
+- Errors during sync
+- Sync duration and performance
+
+### Data Availability Cleanup
+
+**File**: `deploy/gcloud/dataavailability/DataAvailabilityCleanupFunction.kt`
+
+**Implementation**: `dataavailability/DataAvailabilityCleanup.kt`
+
+#### Purpose
+
+Removes old data availability records:
+
+- Identifies data that's no longer needed
+- Removes stale availability records
+- Frees up database storage
+- Maintains data retention policies
+
+#### Metrics
+
+**File**: `dataavailability/DataAvailabilityCleanupMetrics.kt`
+
+### Requisition Fetcher
+
+**File**: `deploy/gcloud/requisitionfetcher/RequisitionFetcherFunction.kt`
+
+#### Purpose
+
+Fetches requisitions from Kingdom and prepares encrypted data for Duchy fulfillment:
+
+<Steps>
+  <Step title="Fetch Requisitions">
+    Query Kingdom for pending requisitions for this EDP
+  </Step>
+  <Step title="Prepare Data">
+    Locate and prepare encrypted event data matching requisition criteria
+  </Step>
+  <Step title="Encrypt for Duchy">
+    Encrypt event data with Duchy's public key
+  </Step>
+  <Step title="Upload">
+    Upload encrypted data to Duchy's Requisition Fulfillment Server
+  </Step>
+  <Step title="Confirm">
+    Notify Kingdom that requisition has been fulfilled
+  </Step>
+</Steps>
+
+## Data Storage
+
+### Encrypted Event Storage
+
+**File**: `EncryptedStorage.kt`
+
+Manages storage of encrypted event data:
+
+<Accordion title="Storage Configuration">
+  **File**: `StorageConfig.kt`
+  
+  Defines storage backend configuration:
+  - Cloud Storage bucket/path
+  - Encryption settings
+  - Access credentials
+  - Data retention policies
+</Accordion>
+
+#### Event Data Format
+
+Events are stored encrypted:
+1. **Source**: Raw events from EDP systems
+2. **Encryption**: Events encrypted with EDP's key
+3. **Storage**: Stored in cloud storage (GCS, S3)
+4. **Metadata**: Tracked in Spanner for queryability
+
+#### Re-encryption for Duchies
+
+When fulfilling requisitions:
+1. Read encrypted events from storage
+2. Decrypt with EDP's private key
+3. Aggregate into encrypted sketches
+4. Encrypt with Duchy's public key
+5. Upload to Duchy
+
+<Note>
+**Privacy**: EDPs never see plaintext event data from other EDPs. The EDP Aggregator only handles data from its own organization.
+</Note>
+
+## Deployment Configuration
+
+Defined in `src/main/k8s/edp_aggregator.cue`:
+
+### Services
+
+```cue
+services: {
+  "edp-aggregator-internal-api-server": {}
+  "edp-aggregator-system-api-server": #ExternalService
+}
+```
+
+### Deployments
+
+Both servers deployed as Kubernetes Deployments:
+- Health checks on port 8080
+- TLS certificates mounted from secrets
+- Trusted certificates from ConfigMap
+- Spanner configuration
+
+### Network Policies
+
+**Internal API Server**:
+- Accepts connections from: System API Server
+- Egress to: Cloud Spanner
+
+**System API Server**:
+- Accepts connections from: External (Kingdom, Duchies)
+- Egress to: Internal API Server
+
+## Security and Privacy
+
+### Encryption at Rest
+
+- Event data encrypted before storage
+- Encryption keys managed by EDP
+- Cloud storage encryption (additional layer)
+
+### Encryption in Transit
+
+- All gRPC communication uses TLS
+- Mutual TLS for service authentication
+- Certificate-based authorization
+
+### Access Control
+
+- Only authorized Duchies can request requisition data
+- Kingdom validates requisition assignments
+- EDP Aggregator verifies authorization before fulfilling
+
+### Data Minimization
+
+- Only aggregate encrypted sketches sent to Duchies
+- Raw event data never leaves EDP control
+- Old data cleaned up according to retention policy
+
+## Integration with Halo System
+
+### Kingdom Integration
+
+The EDP Aggregator interacts with Kingdom:
+
+**Event Group Management**:
+- Register event groups via Kingdom Public API
+- Update event group metadata
+- Report data availability
+
+**Requisition Fulfillment**:
+- Fetch assigned requisitions via Kingdom System API
+- Confirm requisition fulfillment
+- Handle requisition cancellation
+
+### Duchy Integration
+
+Fulfills data requisitions from Duchies:
+
+**Requisition Flow**:
+1. Kingdom creates requisition and assigns to EDP
+2. EDP Aggregator fetches requisition from Kingdom
+3. EDP Aggregator prepares encrypted sketch
+4. EDP Aggregator uploads to Duchy Requisition Fulfillment Server
+5. Duchy confirms receipt with Kingdom
+
+## Monitoring and Operations
+
+### Metrics
+
+<CardGroup cols={2}>
+  <Card title="Event Groups" icon="layer-group">
+    Number of registered and active event groups
+  </Card>
+  <Card title="Data Availability" icon="database">
+    Coverage of available encrypted event data
+  </Card>
+  <Card title="Requisition Fulfillment" icon="check">
+    Success rate and latency of requisition processing
+  </Card>
+  <Card title="Storage Usage" icon="hard-drive">
+    Encrypted event data storage consumption
+  </Card>
+</CardGroup>
+
+### Health Checks
+
+Both servers expose:
+- gRPC health check service
+- HTTP health endpoint on port 8080
+- Kubernetes readiness and liveness probes
+
+### Logging
+
+Configurable verbose logging:
+```bash
+--debug-verbose-grpc-server-logging=true
+--debug-verbose-grpc-client-logging=true
+```
+
+## Operational Considerations
+
+### Scalability
+
+- Internal API Server: Scale based on database load
+- System API Server: Scale based on Kingdom/Duchy request volume
+- Background functions: Serverless auto-scaling
+
+### High Availability
+
+- Multiple replicas of API servers
+- Spanner provides built-in HA
+- Cloud Functions automatically retried
+
+### Disaster Recovery
+
+- Spanner automatic backup and point-in-time recovery
+- Encrypted event data in durable cloud storage
+- Configuration in version control
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Privacy Budget Manager" icon="shield" href="/components/privacy-budget-manager">
+    Learn about privacy budget enforcement
+  </Card>
+  <Card title="Duchy Services" icon="network-wired" href="/components/duchy/services">
+    Understand how Duchies receive EDP data
+  </Card>
+  <Card title="Kingdom Services" icon="crown" href="/components/kingdom/services">
+    Explore Kingdom's role in coordinating EDPs
+  </Card>
+</CardGroup>

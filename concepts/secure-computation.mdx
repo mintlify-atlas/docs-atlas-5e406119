@@ -1,0 +1,216 @@
+---
+title: "Secure Multiparty Computation"
+description: "How multiple Duchies collaborate to compute measurements without revealing sensitive data"
+---
+
+## What is Secure Multiparty Computation?
+
+Secure Multiparty Computation (MPC) is a cryptographic technique that allows multiple parties to jointly compute a function over their private inputs without revealing those inputs to each other. In the Halo Cross-Media Measurement System, MPC enables independent Duchies to collaborate on computing reach and frequency statistics without any single party learning the underlying user-level data.
+
+<Info>
+The key property of MPC: multiple parties can compute `f(x₁, x₂, ..., xₙ)` where each party `i` knows only their input `xᵢ` and the final result, but learns nothing about other parties' inputs.
+</Info>
+
+## Why MPC for Measurement?
+
+Traditional measurement approaches require a trusted third party to collect and process all data. This creates:
+
+- **Single point of failure**: One organization has complete access to sensitive data
+- **Trust concentration**: All parties must trust a single entity
+- **Regulatory challenges**: Data centralization may violate privacy regulations
+
+MPC distributes trust across multiple independent organizations (Duchies), ensuring that:
+
+✅ No single party can access raw user data  
+✅ Data remains encrypted throughout computation  
+✅ Privacy is maintained even if some parties are compromised  
+✅ Results are only revealed when all parties collaborate  
+
+## The Duchy Architecture
+
+The system requires at least **two independent Duchies**, though three or more provides additional security:
+
+### Duchy Roles
+
+<Tabs>
+  <Tab title="Aggregator Duchy">
+    The **Primary Duchy** (aggregator) for a computation:
+    
+    - Receives encrypted sketches from all non-aggregator Duchies
+    - Coordinates the multi-round protocol execution
+    - Combines intermediate results
+    - Returns final results to the Kingdom
+    
+    The aggregator role rotates across computations to distribute trust.
+  </Tab>
+  
+  <Tab title="Non-Aggregator Duchies">
+    **Non-aggregator Duchies** participate in each computation by:
+    
+    - Processing their portion of encrypted data
+    - Performing cryptographic operations (shuffling, partial decryption)
+    - Passing intermediate results to the next Duchy in the ring
+    - Enforcing protocol correctness
+    
+    All Duchies have equal cryptographic power—no single Duchy can decrypt data alone.
+  </Tab>
+</Tabs>
+
+### Multi-Cloud Deployment
+
+<Note>
+For additional security, Duchies should be deployed across different cloud providers (e.g., one on Google Cloud, another on AWS). This prevents infrastructure-level attacks that could compromise multiple Duchies simultaneously.
+</Note>
+
+## How Duchies Collaborate Without Revealing Data
+
+The MPC protocol uses several cryptographic techniques:
+
+### 1. Secret Sharing of Private Keys
+
+Each Duchy holds a **portion of the decryption key**. Encrypted data can only be decrypted through the collaboration of all Duchies:
+
+```
+Public Key (for encryption) = combine(PubKey₁, PubKey₂, ..., PubKeyₙ)
+Private Key₁ | Private Key₂ | ... | Private Keyₙ → Full Decryption
+```
+
+Publishers encrypt their sketches using the **composite public key** (combination of all Duchy public keys). Only by having all Duchies perform partial decryption can the data be revealed.
+
+### 2. Layered Encryption
+
+Data flows through multiple encryption layers:
+
+<Steps>
+  <Step title="Publisher Encryption">
+    Publishers encrypt sketches with the composite ElGamal public key from all Duchies
+  </Step>
+  
+  <Step title="Round 1: Shuffle Phase">
+    Each Duchy shuffles the encrypted data and re-randomizes ciphertexts to hide the original order
+  </Step>
+  
+  <Step title="Round 2: Partial Decryption">
+    Each Duchy removes one layer of encryption using its private key share, passing results to the next Duchy
+  </Step>
+  
+  <Step title="Final Aggregation">
+    Only after all Duchies have processed the data can the final plaintext result be revealed
+  </Step>
+</Steps>
+
+### 3. Cryptographic Shuffling
+
+During the protocol execution, Duchies shuffle encrypted data to destroy information about the original ordering:
+
+- **Purpose**: Prevents linking decrypted values back to specific publishers or users
+- **Implementation**: Each Duchy applies a random permutation to register indices
+- **Verification**: Shuffle correctness can be verified without revealing the permutation
+
+This ensures that even when data is eventually decrypted, it cannot be attributed to individual sources.
+
+### 4. Distributed Noise Addition
+
+Noise for differential privacy is added in a distributed manner:
+
+- Each Duchy contributes a portion of the total noise
+- No single Duchy knows the total noise added
+- Privacy guarantees hold even if some Duchies are compromised
+
+See [Differential Privacy](/concepts/differential-privacy) for details on noise mechanisms.
+
+## Trust Model and Security Guarantees
+
+The system's security is based on an **honest-majority assumption**:
+
+### Security Properties
+
+<Accordion title="Data Confidentiality">
+**Guarantee**: No party learns individual user data
+
+**Why**: Data remains encrypted under a key distributed across multiple Duchies. As long as at least one Duchy is honest, private data cannot be revealed.
+</Accordion>
+
+<Accordion title="Computation Correctness">
+**Guarantee**: Results are computed correctly according to the protocol
+
+**Why**: Multiple independent parties verify each stage. Dishonest behavior by one party can be detected by others.
+</Accordion>
+
+<Accordion title="Result Integrity">
+**Guarantee**: Final measurements accurately reflect the input data (plus differential privacy noise)
+
+**Why**: Cryptographic commitments and verification steps ensure parties cannot manipulate intermediate results undetected.
+</Accordion>
+
+### Threat Model
+
+**The system is secure if**:
+- At least `(n+1)/2` Duchies are honest (for n total Duchies)
+- Duchies do not collude to pool their private keys
+- The underlying cryptographic primitives (ElGamal, elliptic curves) are secure
+
+**The system can tolerate**:
+- Passive adversaries observing network traffic
+- Active adversaries controlling a minority of Duchies
+- Compromised publishers (privacy still holds for other publishers)
+
+**The system does NOT protect against**:
+- Collusion of all Duchies to decrypt data
+- Cryptographic breaks (e.g., quantum attacks on elliptic curve cryptography)
+- Side-channel attacks on Duchy implementations
+
+## Protocol Execution Flow
+
+The MPC protocol executes in multiple phases:
+
+### Initialization
+
+1. Each Duchy generates an ElGamal key pair for the computation
+2. Public keys are shared with the Kingdom
+3. Kingdom computes the composite public key
+4. Publishers encrypt their sketches using this composite key
+
+### Setup Phase
+
+Non-aggregator Duchies:
+- Add distributed noise to their local encrypted sketches
+- Send noised sketches to the aggregator Duchy
+
+Aggregator Duchy:
+- Collects all noised sketches
+- Combines them into a global Combined Register Vector (CRV)
+
+### Execution Phases (Two Rounds)
+
+**Round 1 - Shuffle and Join**:
+- Each Duchy shuffles and re-encrypts data
+- Aggregator joins registers by encrypted identifiers
+- Results flow through all Duchies in a predetermined order
+
+**Round 2 - Decrypt and Aggregate**:
+- Each Duchy performs partial decryption using its private key share
+- Aggregator completes final decryption
+- Frequency distributions are computed and differential privacy is applied
+
+See [Protocol Cryptography](/concepts/protocol-cryptography) for detailed cryptographic operations.
+
+## Implementation Details
+
+The Duchy computation logic is implemented in:
+
+- **Protocol stages**: `src/main/kotlin/org/wfanet/measurement/duchy/db/computation/LiquidLegionsSketchAggregationV2Protocol.kt`
+- **Computation stages**: Defined in `src/main/proto/wfa/measurement/internal/duchy/protocol/liquid_legions_sketch_aggregation_v2.proto`
+- **Mill jobs**: Processing logic in `src/main/kotlin/org/wfanet/measurement/duchy/deploy/common/job/mill/`
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Protocol Cryptography" href="/concepts/protocol-cryptography">
+    Deep dive into the cryptographic operations used in the MPC protocol
+  </Card>
+  
+  <Card title="Sketches" href="/concepts/sketches">
+    Understand the encrypted data structures that flow through the protocol
+  </Card>
+</CardGroup>

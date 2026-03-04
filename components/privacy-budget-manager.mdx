@@ -1,0 +1,519 @@
+---
+title: Privacy Budget Manager
+description: Differential privacy budget tracking and enforcement
+---
+
+The **Privacy Budget Manager** (PBM) enforces differential privacy guarantees by tracking and limiting the amount of "privacy budget" consumed by queries against sensitive datasets. It ensures that the cumulative privacy loss across multiple queries stays within acceptable bounds.
+
+## Purpose
+
+The Privacy Budget Manager provides:
+
+- **Privacy Budget Tracking**: Monitor cumulative privacy expenditure per privacy bucket
+- **Budget Enforcement**: Reject queries that would exceed privacy budget limits
+- **Audit Logging**: Record all queries for privacy compliance auditing
+- **Landscape Management**: Support evolving privacy bucket definitions over time
+
+<Note>
+**Differential Privacy**: A mathematical framework that provides provable privacy guarantees. The Privacy Budget Manager ensures that the total privacy "spent" across all queries never exceeds safe limits, preventing privacy leakage through repeated queries.
+</Note>
+
+## Core Concepts
+
+### Privacy Budget
+
+Differential privacy is quantified by parameters:
+
+- **Epsilon (ε)**: Primary privacy parameter. Lower is more private.
+- **Delta (δ)**: Secondary privacy parameter for approximate DP.
+
+Each query "consumes" privacy budget based on its parameters. The PBM tracks cumulative consumption.
+
+### Privacy Buckets
+
+Data is divided into **privacy buckets** - logical groupings for privacy accounting:
+
+- Typically organized by time period (e.g., day, week, month)
+- May include other dimensions (geography, user segment, etc.)
+- Each bucket has independent privacy budget
+- Defined by the **landscape** configuration
+
+### Landscape
+
+A **landscape** defines:
+
+- The structure of privacy buckets
+- How to map queries to buckets
+- Privacy budget limits per bucket
+- Valid date/time ranges
+
+**File**: `LandscapeProcessor.kt`
+
+Landscapes can evolve over time through a **mapping chain**.
+
+### Queries
+
+A **query** represents:
+
+- A request to access sensitive data
+- Privacy parameters (epsilon, delta)
+- Targeting criteria (which data/buckets)
+- Unique reference ID for deduplication
+
+**File**: `Query` proto definition
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────┐
+│              Client Application                     │
+│          (Measurement Consumer)                     │
+└─────────────────────┬────────────────────────────┘
+                       │
+                       │ charge(queries, groupId)
+                       ▼
+    ┌──────────────────────────────────────────────────┐
+    │        Privacy Budget Manager                   │
+    │                                                  │
+    │  1. Check for duplicate queries                │
+    │  2. Map queries to privacy buckets             │
+    │  3. Calculate privacy charge (delta)           │
+    │  4. Read current bucket charges                │
+    │  5. Verify budget not exceeded                 │
+    │  6. Commit charges to ledger                   │
+    │  7. Write to audit log                         │
+    └──────────────┬────────────────┬────────────────────┘
+                 │                │
+                 ▼                ▼
+       ┌────────────────┐   ┌────────────────┐
+       │ Ledger         │   │ Audit Log      │
+       │ (Postgres/     │   │ (GCS/Cloud     │
+       │  Spanner)      │   │  Storage)      │
+       └────────────────┘   └────────────────┘
+```
+
+## Core Components
+
+### Privacy Budget Manager
+
+**File**: `PrivacyBudgetManager.kt`
+
+#### Initialization
+
+```kotlin
+PrivacyBudgetManager(
+  auditLog: AuditLog,
+  landscapeMappingChain: List<MappingNode>,
+  ledger: Ledger,
+  landscapeProcessor: LandscapeProcessor,
+  maximumPrivacyBudget: Float,
+  maximumTotalDelta: Float,
+  eventTemplateDescriptor: Descriptors.Descriptor
+)
+```
+
+#### Key Parameters
+
+<Accordion title="Maximum Privacy Budget">
+  The maximum epsilon that can be consumed in any single privacy bucket.
+  
+  **Example**: `maximumPrivacyBudget = 10.0`
+  
+  Once this limit is reached, no more queries can target that bucket.
+</Accordion>
+
+<Accordion title="Maximum Total Delta">
+  The maximum cumulative delta parameter across all queries in a bucket.
+  
+  **Example**: `maximumTotalDelta = 0.001`
+  
+  Provides additional privacy guarantee for approximate DP.
+</Accordion>
+
+<Accordion title="Landscape Mapping Chain">
+  A list of `MappingNode` objects defining how to map older landscapes to the current active landscape.
+  
+  **Purpose**: Allows evolving privacy bucket structure over time while maintaining historical accounting.
+  
+  The tail of the list must be the active landscape currently in use.
+</Accordion>
+
+### Main Operation: charge()
+
+The primary method for charging privacy budget:
+
+```kotlin
+suspend fun charge(
+  queries: List<Query>,
+  groupId: String
+): String  // Returns audit reference ID
+```
+
+#### Charge Process
+
+<Steps>
+  <Step title="Check for Duplicates">
+    Read queries from ledger to identify already-committed queries:
+    - Uses external reference IDs for deduplication
+    - Idempotent: charging same query twice doesn't double-charge
+  </Step>
+  
+  <Step title="Calculate Delta">
+    Map new queries to privacy buckets and calculate privacy charge:
+    - Use landscape processor to map queries to buckets
+    - Aggregate epsilon and delta per bucket
+    - Produce a "slice" of privacy charges
+  </Step>
+  
+  <Step title="Read Current Charges">
+    Read existing charges for affected buckets from ledger:
+    - Transactional read for consistency
+    - Gets current epsilon and delta totals
+  </Step>
+  
+  <Step title="Check Budget">
+    Verify that adding new charges doesn't exceed limits:
+    ```kotlin
+    for each bucket:
+      if (currentEpsilon + deltaEpsilon > maximumPrivacyBudget)
+        throw InsufficientPrivacyBudgetException
+      if (currentDelta + deltaDelta > maximumTotalDelta)
+        throw InsufficientPrivacyBudgetException
+    ```
+  </Step>
+  
+  <Step title="Commit to Ledger">
+    Write aggregated charges and queries to ledger:
+    - Atomic transaction ensures consistency
+    - Queries stamped with commit time
+    - Transaction succeeds or fails as unit
+  </Step>
+  
+  <Step title="Write Audit Log">
+    Write ALL queries (including duplicates) to audit log:
+    - Owned by EDP, not modifiable by PBM operator
+    - Provides independent verification
+    - Returns audit reference ID to caller
+    
+    **Important**: Even queries that were already in the ledger are written to the audit log in this call, enabling complete audit trail.
+  </Step>
+</Steps>
+
+### Ledger
+
+**File**: `Ledger.kt`
+
+**Exception**: `LedgerException.kt`
+
+The ledger is a **transactional backing store** for privacy charges:
+
+#### Responsibilities
+
+- Store privacy charge rows (bucket ID → epsilon, delta)
+- Store query records with commit timestamps
+- Provide transactional reads and writes
+- Support querying by reference ID for deduplication
+
+#### Implementations
+
+<Accordion title="PostgresLedger">
+  **File**: `deploy/postgres/PostgresLedger.kt`
+  
+  PostgreSQL-backed ledger:
+  - Uses ACID transactions
+  - Row-level locking for bucket charges
+  - Efficient indexing on reference IDs
+</Accordion>
+
+<Accordion title="InMemoryLedger">
+  **File**: `testing/InMemoryLedger.kt`
+  
+  For testing:
+  - No persistence
+  - Simulates transactional behavior
+  - Fast for unit tests
+</Accordion>
+
+#### Ledger Row Keys
+
+**File**: `Slice.kt`
+
+A "slice" contains:
+- Map of ledger row keys to privacy charges
+- Ledger row key = bucket identifier
+- Privacy charge = (epsilon, delta) tuple
+
+### Audit Log
+
+**File**: `AuditLog.kt`
+
+The audit log is an **append-only, immutable log** owned by the Event Data Provider:
+
+#### Responsibilities
+
+- Record all queries presented to PBM
+- Provide tamper-evident logging
+- Enable independent privacy audits
+- Return audit reference ID for each write
+
+#### Implementations
+
+<Accordion title="GcsAuditLog">
+  **File**: `deploy/gcloud/GcsAuditLog.kt`
+  
+  Google Cloud Storage backed audit log:
+  - Writes to GCS bucket owned by EDP
+  - Object names include timestamps for ordering
+  - Immutable once written (via bucket policy)
+  - Can be in different GCP project than PBM
+</Accordion>
+
+<Accordion title="InMemoryAuditLog">
+  **File**: `testing/InMemoryAuditLog.kt`
+  
+  For testing purposes.
+</Accordion>
+
+#### Audit Trail
+
+The audit log enables:
+
+**Independent Verification**:
+- EDP can verify PBM operated correctly
+- Auditor can reconstruct privacy budget usage
+- Detect unauthorized queries
+
+**Compliance**:
+- Demonstrate privacy budget enforcement
+- Show all queries were properly accounted
+- Provide evidence for privacy audits
+
+### Landscape Processor
+
+**File**: `LandscapeProcessor.kt`
+
+Processes landscape definitions and maps queries to privacy buckets:
+
+#### MappingNode
+
+Defines a landscape and optionally how to map from a previous landscape:
+
+```kotlin
+data class MappingNode(
+  val landscape: Landscape,
+  val mappingFunction: ((OldBucket) -> NewBucket)? = null
+)
+```
+
+#### Landscape Evolution
+
+As privacy bucket structure changes over time:
+
+1. **Initial Landscape**: Define initial bucket structure
+2. **New Landscape**: Define new bucket structure
+3. **Mapping Function**: Define how to map old buckets to new
+4. **Append to Chain**: Add new MappingNode to landscapeMappingChain
+
+The PBM automatically maps historical data to current landscape.
+
+## Privacy Charge Calculation
+
+The PBM calculates privacy charge using composition theorems:
+
+### Sequential Composition
+
+Multiple queries on the same data:
+
+```
+Total Epsilon = sum of individual epsilons
+Total Delta = sum of individual deltas
+```
+
+### Group Privacy
+
+Queries may have a `groupId` representing related queries:
+- Queries in the same group are charged together
+- Group-level privacy guarantees may apply
+- Enables advanced composition techniques
+
+## Error Handling
+
+### Insufficient Privacy Budget
+
+**Exception**: `InsufficientPrivacyBudgetException`
+
+**When**: Adding query charges would exceed budget limits
+
+**Resolution**:
+- Query is rejected (not charged)
+- Ledger and audit log remain unchanged for this query
+- Caller must wait or adjust query parameters
+
+### Ledger Transaction Failure
+
+**Exception**: `LedgerException`
+
+**When**: Database transaction fails
+
+**Resolution**:
+- Entire operation rolled back
+- Nothing written to ledger
+- Audit log not written (since charge failed)
+- Caller should retry
+
+### Audit Log Write Failure
+
+**When**: Audit log write fails after successful ledger commit
+
+**Critical Scenario**:
+- Privacy budget HAS been consumed
+- But audit log doesn't reflect it
+- Caller should NOT fulfill requisitions
+- System should alert operators
+
+**Idempotent Retry**:
+On retry, queries already in ledger are not re-charged, but ARE written to audit log, resolving the inconsistency.
+
+## Integration with Halo
+
+The Privacy Budget Manager integrates with the Halo system:
+
+### EDP Integration
+
+EDPs use PBM before fulfilling requisitions:
+
+<Steps>
+  <Step title="Receive Requisition">
+    EDP Aggregator receives requisition from Kingdom
+  </Step>
+  <Step title="Construct Queries">
+    Convert requisition into privacy queries
+  </Step>
+  <Step title="Charge Privacy Budget">
+    Call `PBM.charge(queries, groupId)`
+  </Step>
+  <Step title="Fulfill or Reject">
+    If charge succeeds: fulfill requisition
+    If charge fails: reject requisition (insufficient budget)
+  </Step>
+</Steps>
+
+### Privacy Parameters
+
+Measurement Consumers specify privacy parameters:
+- Epsilon and delta in measurement request
+- Kingdom validates parameters
+- EDP PBM enforces budget limits
+
+## Deployment Considerations
+
+### Ledger Backend
+
+Choose based on requirements:
+
+**PostgreSQL**:
+- ACID transactions
+- Mature and well-understood
+- Good for moderate scale
+- Easier to operate
+
+**Cloud Spanner**:
+- Global distribution
+- Higher scalability
+- Built-in high availability
+- Higher cost
+
+### Audit Log Storage
+
+**Requirements**:
+- Immutable (write-once)
+- Owned by EDP (different from PBM operator)
+- Durable and highly available
+- Access controls (EDP and auditor only)
+
+**Recommendations**:
+- Enable object versioning
+- Set bucket retention policy
+- Use separate GCP project/AWS account
+- Encrypt at rest
+
+### High Availability
+
+Ensure PBM is highly available:
+- Multiple PBM instances behind load balancer
+- Database with replication and failover
+- Monitoring and alerting for failures
+- Automated retry with exponential backoff
+
+## Security
+
+### Access Control
+
+- Only authorized services can call PBM.charge()
+- Mutual TLS for authentication
+- Rate limiting to prevent abuse
+
+### Data Protection
+
+- Queries may contain sensitive targeting criteria
+- Encrypt data in transit and at rest
+- Minimize retention of query details
+
+### Audit Log Security
+
+- Audit log immutable and tamper-evident
+- Separate from PBM operator control
+- EDP controls access
+- Enable logging of access to audit log itself
+
+## Monitoring
+
+<CardGroup cols={2}>
+  <Card title="Budget Utilization" icon="gauge">
+    Current privacy budget consumed per bucket
+  </Card>
+  <Card title="Rejection Rate" icon="ban">
+    Percentage of queries rejected due to insufficient budget
+  </Card>
+  <Card title="Charge Latency" icon="clock">
+    Time to process charge() operation
+  </Card>
+  <Card title="Audit Log Lag" icon="file-lines">
+    Delay between ledger commit and audit log write
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+### Setting Budget Limits
+
+- Base on differential privacy theory and acceptable privacy loss
+- Consider cumulative loss over bucket lifetime
+- Set conservative limits initially
+- Monitor and adjust based on usage patterns
+
+### Landscape Design
+
+- Align bucket granularity with measurement frequency
+- Finer buckets = more flexibility, more complex accounting
+- Coarser buckets = simpler, but less flexibility
+- Plan for landscape evolution
+
+### Testing
+
+- Test with representative query patterns
+- Verify budget enforcement at limits
+- Test landscape mapping functions
+- Simulate concurrent charge() calls
+- Validate audit log completeness
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="EDP Aggregator" icon="layer-group" href="/components/edp-aggregator">
+    Learn how EDPs integrate with PBM
+  </Card>
+  <Card title="Kingdom Overview" icon="crown" href="/components/kingdom/overview">
+    Understand measurement orchestration
+  </Card>
+</CardGroup>

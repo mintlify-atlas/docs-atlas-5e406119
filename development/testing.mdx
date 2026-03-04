@@ -1,0 +1,273 @@
+---
+title: Testing
+description: Testing procedures and organization for the Halo measurement system
+---
+
+The Halo measurement system uses Bazel for running all tests, including unit tests, integration tests, and correctness tests.
+
+## Running Tests
+
+### Run All Tests
+
+Execute the entire test suite:
+
+```bash
+bazel test //src/test/...
+```
+
+### Run Specific Test Targets
+
+<CodeGroup>
+```bash Single Package
+bazel test //src/test/kotlin/org/wfanet/measurement/common:all
+```
+
+```bash Specific Test
+bazel test //src/test/kotlin/org/wfanet/measurement/kingdom/service/api/v2alpha:DataProvidersServiceTest
+```
+
+```bash With Output
+bazel test //src/test/... --test_output=streamed
+```
+</CodeGroup>
+
+## Test Organization
+
+Tests are organized in the `src/test/` directory tree, mirroring the structure of the source code:
+
+<CodeGroup>
+```text Kotlin Tests
+src/test/kotlin/
+├── org/wfanet/measurement/
+│   ├── common/          # Common utilities tests
+│   ├── kingdom/         # Kingdom service tests
+│   ├── reporting/       # Reporting service tests
+│   └── integration/     # Integration tests
+```
+
+```text C++ Tests
+src/test/cc/
+└── wfa/measurement/
+    ├── common/          # Common C++ tests
+    └── internal/duchy/  # Duchy protocol tests
+```
+
+```text Python Tests
+src/test/python/
+└── wfa/measurement/
+    └── reporting/       # Python reporting tests
+```
+</CodeGroup>
+
+<Note>
+  Test infrastructure that is complex enough to warrant its own tests, or is used by multiple packages, goes into a `testing` subpackage in `src/main/` with targets marked as `testonly`.
+</Note>
+
+## Integration Tests
+
+Integration tests verify that multiple components work together correctly. They are located in:
+
+- `src/test/kotlin/org/wfanet/measurement/integration/k8s/` - Kubernetes integration tests
+- `src/test/kotlin/org/wfanet/measurement/integration/common/` - Common integration utilities
+
+### Running Integration Tests
+
+```bash
+bazel test //src/test/kotlin/org/wfanet/measurement/integration/...
+```
+
+## Correctness Tests
+
+Correctness tests validate the accuracy of measurement computations against expected results. These tests typically run against a full CMMS deployment.
+
+### Synthetic Generator Correctness Test
+
+This test validates end-to-end measurement accuracy:
+
+```bash
+bazel test //src/test/kotlin/org/wfanet/measurement/integration/k8s:SyntheticGeneratorCorrectnessTest \
+    --test_output=streamed \
+    --define=kingdom_public_api_target=v2alpha.kingdom.example.org:8443 \
+    --define=mc_name=measurementConsumers/your-mc-id \
+    --define=mc_api_key=your-api-key
+```
+
+<Tip>
+  Use the `--test_output=streamed` flag to see test output in real-time, which is helpful for long-running integration tests.
+</Tip>
+
+### Test Configuration with Make Variables
+
+Many integration and correctness tests require configuration via Bazel's `--define` flag:
+
+<CodeGroup>
+```bash Resource Configuration
+--define=mc_name=measurementConsumers/Rcn7fKd25C8
+--define=mc_api_key=W9q4zad246g
+--define=edp1_name=dataProviders/FeQ5FqAQ5_0
+```
+
+```bash API Endpoints
+--define=kingdom_public_api_target=v2alpha.kingdom.example.org:8443
+--define=reporting_public_api_target=v2alpha.reporting.example.org:8443
+```
+
+```bash Using Config File
+# Add to .bazelrc:
+build:halo-dev --define=kingdom_public_api_target=...
+build:halo-dev --define=mc_name=...
+
+# Then use:
+bazel test //src/test/... --config=halo-dev
+```
+</CodeGroup>
+
+## TestContainers
+
+Some tests use [TestContainers](https://www.testcontainers.org/) to spin up Docker containers for dependencies like databases.
+
+<Steps>
+  <Step title="Ensure Docker is running">
+    TestContainers requires Docker to be available on your system.
+  </Step>
+  
+  <Step title="Run tests normally">
+    ```bash
+    bazel test //src/test/kotlin/org/wfanet/measurement/kingdom/deploy/gcloud/spanner:...
+    ```
+  </Step>
+  
+  <Step title="Container-based testing">
+    When running inside a container, use `tools/bazel-container` which handles the required setup:
+    
+    ```bash
+    tools/bazel-container test //src/test/...
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  Podman is not supported for TestContainers-based tests. You must use Docker.
+</Warning>
+
+## Testing Best Practices
+
+### Unit Testing Standards
+
+<CardGroup cols={2}>
+  <Card title="Test the Contract" icon="handshake">
+    Test public APIs, not implementation details. Internal functionality should not be exposed just for testing.
+  </Card>
+  
+  <Card title="Use Test Doubles Wisely" icon="clone">
+    Choose appropriate test doubles:
+    - **Fakes** for working implementations
+    - **Mocks** for behavior verification
+    - **Stubs** for simple responses
+    - **Real dependencies** when practical
+  </Card>
+  
+  <Card title="Smaller Test Cases" icon="microscope">
+    Bias toward more, smaller test cases rather than fewer large ones.
+  </Card>
+  
+  <Card title="Truth Assertions" icon="check">
+    Use the [Truth](https://truth.dev/) library for Kotlin test assertions, including [ProtoTruth](https://truth.dev/protobufs) for protocol buffers.
+  </Card>
+</CardGroup>
+
+### Writing Tests in Kotlin
+
+```kotlin
+import com.google.common.truth.Truth.assertThat
+import com.google.common.truth.extensions.proto.ProtoTruth.assertThat
+import kotlin.test.assertFailsWith
+import org.junit.Test
+
+class MyServiceTest {
+  @Test
+  fun `createResource returns expected result`() {
+    val service = MyService()
+    val result = service.createResource("test")
+    
+    assertThat(result.name).isEqualTo("test")
+  }
+  
+  @Test
+  fun `createResource with invalid input throws exception`() {
+    val service = MyService()
+    
+    assertFailsWith<IllegalArgumentException> {
+      service.createResource("")
+    }
+  }
+}
+```
+
+## CI/CD Testing
+
+Continuous integration runs tests automatically on pull requests and commits. The CI pipeline:
+
+1. Runs formatters and linters
+2. Executes all unit tests
+3. Runs integration tests where applicable
+4. Checks for compiler warnings
+5. Validates code coverage
+
+<Note>
+  All tests must pass before a pull request can be merged. See the [Contributing Guide](./contributing) for more information.
+</Note>
+
+## Test Output Options
+
+<CodeGroup>
+```bash Stream Output
+# See output as tests run
+bazel test //src/test/... --test_output=streamed
+```
+
+```bash Show All Output
+# Show all output, even for passing tests
+bazel test //src/test/... --test_output=all
+```
+
+```bash Errors Only
+# Only show output for failed tests (default)
+bazel test //src/test/... --test_output=errors
+```
+
+```bash Verbose
+# Show detailed test information
+bazel test //src/test/... --verbose_failures
+```
+</CodeGroup>
+
+## Monitoring Test Execution
+
+For correctness tests running against a deployed system, you can monitor progress through:
+
+- **Pod logs** in Kubernetes clusters
+- **Spanner database** queries to check measurement states
+- **Test output** with `--test_output=streamed`
+
+Example test run showing successful completion:
+
+```
+INFO: Created measurement measurementConsumers/ABC/measurements/XYZ.
+INFO: Computation not done yet, wait for another 30 seconds.
+...
+INFO: Got computed result from Kingdom: reach { value: 11542 }
+INFO: Expected result: reach { value: 11570 }
+INFO: Computed result is equal to the expected result. Correctness Test passes.
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Dev Standards" icon="book" href="./standards">
+    Learn about code review and commit standards
+  </Card>
+  <Card title="Contributing" icon="code-pull-request" href="./contributing">
+    How to contribute to the project
+  </Card>
+</CardGroup>

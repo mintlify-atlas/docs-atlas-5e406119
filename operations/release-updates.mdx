@@ -1,0 +1,353 @@
+---
+title: Updating to New Releases
+description: Step-by-step guide for updating Halo CMMS components to new release versions
+---
+
+Learn how to safely update your Halo Cross-Media Measurement System components to new release versions, including Kingdom, Duchy, and Reporting services.
+
+## Prerequisites
+
+<Note>
+**Assumptions**
+
+- You maintain your Kubernetes object configurations in a Kustomization directory
+- Your configurations are under version control (recommended)
+- You have `kubectl` configured to point to your cluster
+- You have appropriate access permissions to update the cluster
+</Note>
+
+## Update Process
+
+<Steps>
+
+<Step title="Read the release notes">
+
+Release notes are available on the [GitHub Releases](https://github.com/world-federation-of-advertisers/cross-media-measurement/releases) page.
+
+**Important sections to review:**
+
+1. **Potentially Requiring Action** - Critical changes that need manual intervention
+2. **New Features** - Configuration options for new functionality
+3. **Bug Fixes** - Issues resolved in this release
+4. **Breaking Changes** - API or configuration changes that may affect your deployment
+
+<Warning>
+**Review ALL intermediate releases**
+
+If you're updating across multiple versions, read the release notes for EVERY release between your current version and the target version.
+
+For example, updating from v0.5.0 to v0.5.7 requires reviewing notes for v0.5.1, v0.5.2, v0.5.3, v0.5.4, v0.5.5, v0.5.6, and v0.5.7.
+</Warning>
+
+</Step>
+
+<Step title="Update Kubernetes configuration files">
+
+Make the following changes to your Kustomization directory:
+
+### Update Container Images
+
+Update the `image` field for each [`Container`](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#Container) in your PodSpecs.
+
+Pre-built images are published on [GitHub Packages](https://github.com/orgs/world-federation-of-advertisers/packages?repo_name=cross-media-measurement). Use the release version as the image tag.
+
+**Image naming pattern:**
+```
+ghcr.io/world-federation-of-advertisers/<component>:<version>
+```
+
+**Example updates:**
+
+```yaml
+# Kingdom public API server
+image: ghcr.io/world-federation-of-advertisers/kingdom/v2alpha-public-api:0.5.7
+
+# Duchy herald
+image: ghcr.io/world-federation-of-advertisers/duchy/herald:0.5.7
+
+# Reporting server
+image: ghcr.io/world-federation-of-advertisers/reporting/v2alpha-public-api-server:0.5.7
+```
+
+### Apply Release-Specific Changes
+
+Make any configuration changes indicated in the release notes, such as:
+
+- New environment variables
+- Updated command-line flags
+- Modified ConfigMap or Secret structures
+- New RBAC permissions
+- Database schema migrations
+
+</Step>
+
+<Step title="Preview changes with diff (recommended)">
+
+Before applying changes, preview what will be modified:
+
+```bash
+kubectl diff -k path/to/kustomization
+```
+
+**Verify the diff includes:**
+
+- ✅ Expected image tag updates
+- ✅ Configuration changes from release notes
+- ✅ No unexpected modifications
+- ✅ No deletions unless intentional
+
+<Note>
+If you see unexpected changes, review your Kustomization files before proceeding.
+</Note>
+
+</Step>
+
+<Step title="Apply the new configuration">
+
+Apply the updated configuration to your cluster:
+
+```bash
+kubectl apply -k path/to/kustomization
+```
+
+### Using ApplySet for Safe Pruning
+
+To ensure object deletions and renames are handled properly, use ApplySet:
+
+```bash
+# Create or update with ApplySet
+kubectl apply -k path/to/kustomization --applyset=halo-kingdom --prune
+```
+
+<Warning>
+**Pruning Considerations**
+
+The `--prune` option deletes objects that are no longer in your configuration. Always:
+
+1. Use `kubectl diff` first to see what would be deleted
+2. Use ApplySet to scope pruning to your deployment
+3. Have backups before pruning
+
+See [Introducing ApplySet Pruning](https://kubernetes.io/blog/2023/05/09/introducing-kubectl-applyset-pruning/) for more information.
+</Warning>
+
+</Step>
+
+<Step title="Monitor the rollout">
+
+Watch the deployment progress:
+
+```bash
+# Monitor all deployments
+kubectl get deployments -w
+
+# Check specific deployment status
+kubectl rollout status deployment/kingdom-v2alpha-public-api-server
+
+# View pod status
+kubectl get pods
+```
+
+**Verify successful rollout:**
+
+```bash
+# Check deployment history
+kubectl rollout history deployment/kingdom-v2alpha-public-api-server
+
+# Check pod logs for errors
+kubectl logs -l app=kingdom-v2alpha-public-api-server --tail=100
+```
+
+</Step>
+
+<Step title="Verify functionality">
+
+After the rollout completes, verify your deployment is functioning correctly:
+
+- Test API endpoints
+- Run health checks
+- Verify metrics are being collected
+- Check for any error logs
+- Test a sample measurement workflow
+
+</Step>
+
+</Steps>
+
+## Rollback Procedure
+
+If issues occur during or after the update:
+
+<Steps>
+
+<Step title="Rollback deployment">
+
+Kubernetes maintains deployment history. Rollback to the previous version:
+
+```bash
+# Rollback specific deployment
+kubectl rollout undo deployment/kingdom-v2alpha-public-api-server
+
+# Rollback to specific revision
+kubectl rollout undo deployment/kingdom-v2alpha-public-api-server --to-revision=2
+```
+
+</Step>
+
+<Step title="Restore configuration">
+
+If you made configuration changes:
+
+```bash
+# Using version control
+git revert <commit-hash>
+kubectl apply -k path/to/kustomization
+
+# Or manually restore previous configuration
+kubectl apply -f previous-config-backup.yaml
+```
+
+</Step>
+
+<Step title="Verify rollback">
+
+Ensure the system is stable after rollback:
+
+```bash
+kubectl get pods
+kubectl rollout status deployment/kingdom-v2alpha-public-api-server
+```
+
+</Step>
+
+</Steps>
+
+## Best Practices
+
+<Note>
+**Version Control**
+
+- Commit all configuration changes before applying
+- Use meaningful commit messages referencing the release version
+- Tag commits with release versions (e.g., `deployed-v0.5.7`)
+- Keep a changelog of your deployment configuration changes
+</Note>
+
+<Warning>
+**Production Updates**
+
+1. **Test in non-production first** - Deploy to staging/dev environment before production
+2. **Plan maintenance windows** - Schedule updates during low-traffic periods
+3. **Notify stakeholders** - Inform users of potential downtime
+4. **Have rollback plan ready** - Know how to quickly revert if needed
+5. **Monitor closely** - Watch metrics and logs during and after update
+</Warning>
+
+## Multi-Component Updates
+
+When updating a multi-component deployment (Kingdom, Duchies, Reporting):
+
+<Steps>
+
+<Step title="Review compatibility">
+
+Check release notes for component version compatibility requirements.
+
+</Step>
+
+<Step title="Update in order">
+
+Typical update order:
+
+1. **Kingdom** (central coordinator)
+2. **Duchies** (computation participants)
+3. **Reporting** (reporting services)
+4. **Data Providers** (data sources)
+5. **Measurement Consumers** (clients)
+
+</Step>
+
+<Step title="Verify inter-component communication">
+
+After each component update, verify:
+
+- mTLS connections are working
+- API calls succeed
+- Computation workflows complete
+
+</Step>
+
+</Steps>
+
+## Troubleshooting
+
+<Accordion title="Pods in CrashLoopBackOff">
+
+Check pod logs for errors:
+
+```bash
+kubectl logs <pod-name> --previous
+kubectl describe pod <pod-name>
+```
+
+Common causes:
+- Configuration errors from release-specific changes
+- Missing required environment variables
+- Database migration issues
+- Certificate/secret mount problems
+
+</Accordion>
+
+<Accordion title="Image pull errors">
+
+Verify image name and tag:
+
+```bash
+kubectl describe pod <pod-name>
+```
+
+Check:
+- Image tag matches the release version
+- You have access to GitHub Packages
+- Image pull secrets are configured correctly
+
+</Accordion>
+
+<Accordion title="Database migration failures">
+
+Some releases require database schema updates:
+
+```bash
+# Check migration job logs
+kubectl logs job/<migration-job-name>
+
+# Verify database connectivity
+kubectl exec -it <pod-name> -- sh
+```
+
+Refer to release notes for specific migration procedures.
+
+</Accordion>
+
+<Accordion title="Configuration validation errors">
+
+If configuration is rejected:
+
+```bash
+# Validate YAML syntax
+kubectl apply --dry-run=client -k path/to/kustomization
+
+# Validate server-side
+kubectl apply --dry-run=server -k path/to/kustomization
+```
+
+Review release notes for configuration schema changes.
+
+</Accordion>
+
+## Additional Resources
+
+- [Building from Source](/development/building) - Build custom images
+- [Kingdom Deployment Guide](/deployment/kingdom-gke) - Initial setup
+- [Certificate Rotation](./certificate-rotation) - Certificate management
+- [GitHub Releases](https://github.com/world-federation-of-advertisers/cross-media-measurement/releases) - Release notes and changelogs

@@ -1,0 +1,586 @@
+---
+title: System Components
+description: Detailed breakdown of Kingdom services, Duchy services, and supporting infrastructure
+---
+
+## Overview
+
+The Halo Cross-Media Measurement System consists of multiple microservices deployed on Kubernetes. This page provides a comprehensive breakdown of all major components, their roles, and how they interact.
+
+## Component Categories
+
+<CardGroup cols={3}>
+  <Card title="Kingdom Services" icon="crown">
+    Central coordination and API services
+  </Card>
+  <Card title="Duchy Services" icon="shield">
+    Secure computation and storage components
+  </Card>
+  <Card title="Supporting Services" icon="gear">
+    Databases, storage, and infrastructure
+  </Card>
+</CardGroup>
+
+## Kingdom Components
+
+The Kingdom deployment consists of API servers, daemons, and batch jobs that coordinate the measurement system.
+
+### Kingdom Services
+
+<Accordion title="v2alpha Public API Server">
+  **Purpose**: External-facing API for measurement consumers (advertisers) and data providers (publishers).
+
+  **Key APIs**:
+  - `MeasurementsService`: Create and manage measurements
+  - `MeasurementConsumersService`: Manage measurement consumer resources
+  - `DataProvidersService`: Manage data provider resources
+  - `EventGroupsService`: Manage event group definitions
+  - `CertificatesService`: Manage authentication certificates
+  - `AccountsService` and `ApiKeysService`: Authentication and authorization
+
+  **Deployment**:
+  - Exposed via LoadBalancer with external IP
+  - Requires mTLS authentication
+  - Port: 8443 (gRPC over TLS)
+  - DNS: e.g., `v2alpha.kingdom.example.com`
+
+  **Source Location**: 
+  - `src/main/kotlin/org/wfanet/measurement/kingdom/service/api/v2alpha/`
+  - Deployment: `src/main/kotlin/org/wfanet/measurement/kingdom/deploy/gcloud/`
+</Accordion>
+
+<Accordion title="System API Server (v1alpha)">
+  **Purpose**: System-level API for inter-component communication, primarily used by Duchies.
+
+  **Key APIs**:
+  - `ComputationParticipantsService`: Duchy participation in computations
+  - `ComputationsService`: Computation state and workflow
+  - `RequisitionsService`: Requisition management for Duchies
+  - `ComputationLogEntriesService`: Computation logging and debugging
+
+  **Deployment**:
+  - Exposed via LoadBalancer with external IP
+  - Requires mTLS authentication from Duchy certificates
+  - Port: 8443 (gRPC over TLS)
+  - DNS: e.g., `v1alpha.system.kingdom.example.com`
+
+  **Source Location**: 
+  - `src/main/kotlin/org/wfanet/measurement/kingdom/service/system/`
+</Accordion>
+
+<Accordion title="Internal Data Server">
+  **Purpose**: Kingdom's internal data access layer, provides database operations for other Kingdom services.
+
+  **Responsibilities**:
+  - Database access and transaction management
+  - Data consistency and integrity
+  - Cloud Spanner integration
+  - Internal service-to-service communication
+
+  **Deployment**:
+  - ClusterIP service (internal only)
+  - Not exposed outside the Kubernetes cluster
+  - Port: 8443 (gRPC over TLS)
+
+  **Source Location**: 
+  - `src/main/kotlin/org/wfanet/measurement/kingdom/service/internal/`
+</Accordion>
+
+### Kingdom Batch Jobs
+
+The Kingdom runs periodic maintenance jobs as Kubernetes CronJobs:
+
+<CardGroup cols={3}>
+  <Card title="Completed Measurements Deletion" icon="trash">
+    Periodically deletes completed measurements and associated data based on retention policies.
+  </Card>
+  <Card title="Pending Measurements Cancellation" icon="ban">
+    Cancels measurements that have been pending for too long without fulfillment.
+  </Card>
+  <Card title="Exchanges Deletion" icon="recycle">
+    Cleans up completed exchange workflow data.
+  </Card>
+</CardGroup>
+
+### Kingdom Configuration
+
+The Kingdom requires several configuration files and secrets:
+
+**Secrets** (`certs-and-configs` K8s Secret):
+- `all_root_certs.pem`: Trusted CA certificates for all entities
+- `kingdom_root.pem`: Kingdom's CA certificate
+- `kingdom_tls.pem` / `kingdom_tls.key`: Kingdom TLS certificate and key
+- `duchy_cert_config.textproto`: Duchy certificate to ID mapping
+- `duchy_id_config.textproto`: External to internal Duchy ID mapping
+- Protocol configs: `llv2_protocol_config_config.textproto`, `ro_llv2_protocol_config_config.textproto`, `hmss_protocol_config_config.textproto`
+
+**ConfigMaps** (`config-files`):
+- `authority_key_identifier_to_principal_map.textproto`: AKID to resource mapping
+- `known_event_group_metadata_type_set.pb`: Event group metadata schemas
+
+## Duchy Components
+
+Each Duchy deployment is independent and includes computation engines, storage, and coordination services.
+
+### Duchy Services
+
+<Accordion title="Computation Control Server">
+  **Purpose**: System API endpoint for inter-Duchy communication during secure computations.
+
+  **Responsibilities**:
+  - Receive computation stage data from other Duchies
+  - Advance computation through protocol stages
+  - Coordinate multi-party computation workflow
+  - Handle computation state transitions
+
+  **Deployment**:
+  - Exposed via LoadBalancer with external IP
+  - Requires mTLS authentication from other Duchy certificates
+  - Port: 8443 (gRPC over TLS)
+  - DNS: e.g., `worker1-duchy-system.example.com`
+
+  **Source Location**: 
+  - `src/main/kotlin/org/wfanet/measurement/duchy/service/system/v1alpha/ComputationControlService.kt`
+</Accordion>
+
+<Accordion title="Requisition Fulfillment Server">
+  **Purpose**: Public API for data providers to submit encrypted measurement data.
+
+  **Responsibilities**:
+  - Receive encrypted sketches from publishers
+  - Store encrypted data in Duchy storage
+  - Proxy requisition list queries to Kingdom
+  - Notify Kingdom when requisitions are fulfilled
+
+  **Deployment**:
+  - Exposed via LoadBalancer with external IP
+  - Requires mTLS authentication from data provider certificates
+  - Port: 8443 (gRPC over TLS)
+  - DNS: e.g., `worker1-duchy-v2alpha.example.com`
+
+  **Source Location**: 
+  - `src/main/kotlin/org/wfanet/measurement/duchy/service/api/v2alpha/RequisitionFulfillmentService.kt`
+</Accordion>
+
+<Accordion title="Spanner Computations Server">
+  **Purpose**: Internal data access layer for Duchy computation metadata.
+
+  **Responsibilities**:
+  - Database operations for computation state
+  - Cloud Spanner integration
+  - Computation metadata management
+  - Internal service-to-service API
+
+  **Deployment**:
+  - ClusterIP service (internal only)
+  - Not exposed outside the Kubernetes cluster
+  - Port: 8443 (gRPC over TLS)
+
+  **Source Location**: 
+  - `src/main/kotlin/org/wfanet/measurement/duchy/service/internal/computations/`
+</Accordion>
+
+<Accordion title="Async Computation Control Server">
+  **Purpose**: Internal service for asynchronous computation control operations.
+
+  **Responsibilities**:
+  - Asynchronous computation state updates
+  - Internal coordination between Duchy components
+  - Non-blocking computation operations
+
+  **Deployment**:
+  - ClusterIP service (internal only)
+  - Port: 8443 (gRPC over TLS)
+
+  **Source Location**: 
+  - `src/main/kotlin/org/wfanet/measurement/duchy/service/internal/computationcontrol/`
+</Accordion>
+
+### Duchy Daemons
+
+Duchies run several daemon processes as Kubernetes Deployments:
+
+<Accordion title="Herald Daemon">
+  **Purpose**: Polls the Kingdom to claim ready computations and initiate computation workflows.
+
+  **Workflow**:
+  1. Polls Kingdom System API at regular intervals
+  2. Identifies computations where all requisitions are fulfilled
+  3. Claims computations for this Duchy to process
+  4. Starts appropriate computation protocol workflow
+  5. Handles computation role assignment (Primary vs. Non-Primary)
+
+  **Configuration**:
+  - Polling interval (typically seconds to minutes)
+  - Duchy identity and certificates
+  - Supported protocols
+
+  **Source Location**: 
+  - `src/main/kotlin/org/wfanet/measurement/duchy/herald/Herald.kt`
+  - Protocol starters: `LiquidLegionsV2Starter.kt`, `HonestMajorityShareShuffleStarter.kt`, etc.
+</Accordion>
+
+<Accordion title="Mill Job Scheduler">
+  **Purpose**: Schedules and manages mill computation jobs as Kubernetes Jobs.
+
+  **Responsibilities**:
+  - Monitor computation state for stages requiring mill execution
+  - Create Kubernetes Job resources from PodTemplates
+  - Manage job lifecycle and cleanup
+  - Track job completion and failures
+
+  **Mill Types**:
+  - Liquid Legions v2 Mill
+  - Reach-Only Liquid Legions v2 Mill
+  - Honest Majority Share Shuffle (HMSS) Mill
+  - Trustee Mill (for key generation)
+
+  **Deployment**:
+  - Requires Kubernetes RBAC permissions to create Jobs
+  - Role and RoleBinding for job management
+
+  **Source Location**: 
+  - `src/main/kotlin/org/wfanet/measurement/duchy/deploy/common/daemon/mill/MillJobScheduler.kt`
+</Accordion>
+
+### Duchy Mills (Computation Engines)
+
+Mills are the actual computation engines that execute secure multiparty computation protocols. They run as Kubernetes Jobs, dynamically created by the Mill Job Scheduler.
+
+<Accordion title="Liquid Legions v2 Mill">
+  **Purpose**: Execute the Liquid Legions v2 protocol for reach and frequency measurements.
+
+  **Protocol Stages**:
+  1. **Initialization**: Setup stage and load encrypted sketches
+  2. **Setup**: Prepare encrypted data for computation
+  3. **Shuffle Phase**: Each Duchy shuffles encrypted register indices
+  4. **Aggregation**: Combine encrypted sketches
+  5. **Decryption Phase**: Each Duchy applies partial decryption
+  6. **Completion**: Finalize results and return to Kingdom
+
+  **Operations**:
+  - Fetch encrypted sketches from storage
+  - Add differential privacy noise
+  - Apply cryptographic transformations
+  - Communicate with other Duchies
+  - Store intermediate results
+
+  **Source Location**: 
+  - `src/main/kotlin/org/wfanet/measurement/duchy/mill/liquidlegionsv2/`
+</Accordion>
+
+<Accordion title="Honest Majority Share Shuffle Mill">
+  **Purpose**: Execute the HMSS protocol as an alternative to Liquid Legions.
+
+  **Protocol Characteristics**:
+  - Different security assumptions (honest majority)
+  - Share-based secret sharing instead of threshold encryption
+  - Shuffle-based computation
+
+  **Source Location**: 
+  - `src/main/kotlin/org/wfanet/measurement/duchy/mill/shareshuffle/`
+</Accordion>
+
+<Accordion title="Trustee Mill">
+  **Purpose**: Handle cryptographic key generation and management for protocols.
+
+  **Responsibilities**:
+  - Generate Tink key pairs for HMSS protocol
+  - Secure key storage and management
+  - Key encryption using KEK (Key Encryption Key)
+
+  **Source Location**: 
+  - `src/main/kotlin/org/wfanet/measurement/duchy/mill/trustee/`
+</Accordion>
+
+### Duchy Batch Jobs
+
+<Card title="Computations Cleaner" icon="broom">
+  CronJob that periodically cleans up completed computation data based on retention policies.
+  
+  **Location**: `src/main/kotlin/org/wfanet/measurement/duchy/service/internal/computations/ComputationsCleaner.kt`
+</Card>
+
+### Duchy Configuration
+
+Each Duchy requires configuration files and secrets:
+
+**Secrets** (`certs-and-configs` K8s Secret):
+- `all_root_certs.pem`: Trusted CA certificates
+- `{duchy_name}_tls.pem` / `{duchy_name}_tls.key`: Duchy TLS certificate and key
+- `{duchy_name}_cs_cert.der` / `{duchy_name}_cs_private.der`: Consent signaling certificate (DER format)
+- `duchy_cert_config.textproto`: Duchy certificate mapping
+- `{role}_protocols_setup_config.textproto`: Protocol configuration (aggregator or non_aggregator role)
+- `{duchy_name}_kek.tink`: Key encryption key for HMSS protocol
+
+**ConfigMaps** (`config-files`):
+- `authority_key_identifier_to_principal_map.textproto`: AKID to resource mapping
+
+## Supporting Infrastructure
+
+### Storage Systems
+
+<AccordionGroup>
+  <Accordion title="Google Cloud Spanner">
+    **Usage**: Primary database for Kingdom and Duchy metadata
+
+    **Kingdom Databases**:
+    - Measurements and requisitions
+    - Resource metadata (DataProviders, MeasurementConsumers, Duchies)
+    - Event groups and certificates
+    - Computation assignments
+
+    **Duchy Databases**:
+    - Computation state machines
+    - Computation protocol stages
+    - Workflow metadata
+
+    **Characteristics**:
+    - Global consistency
+    - Horizontal scalability
+    - Automatic replication
+    - ACID transactions
+
+    **Deployment**:
+    - Specified via `--spanner_instance` and database names
+    - Requires Workload Identity for access
+    - Schema managed via migration scripts
+  </Accordion>
+
+  <Accordion title="Google Cloud Storage / AWS S3">
+    **Usage**: Blob storage for encrypted sketches and intermediate computation data
+
+    **Duchy Storage**:
+    - Encrypted sketches submitted by publishers
+    - Intermediate computation results
+    - Large encrypted datasets
+
+    **Access**:
+    - GCS: Workload Identity with bucket IAM
+    - S3: IAM roles and policies
+    - Secure, isolated per Duchy
+
+    **Deployment**:
+    - Specified via `--duchy_storage_bucket` parameter
+    - Automatic scaling with data volume
+  </Accordion>
+
+  <Accordion title="PostgreSQL (Optional)">
+    **Usage**: Alternative database backend for certain components
+
+    **Use Cases**:
+    - Reporting v2 server metadata
+    - Privacy budget manager
+    - Some deployment configurations
+
+    **Deployment**:
+    - Cloud SQL for PostgreSQL on GCP
+    - RDS on AWS
+    - Self-managed PostgreSQL clusters
+  </Accordion>
+</AccordionGroup>
+
+### Authentication and Security
+
+<Accordion title="Mutual TLS (mTLS)">
+  All services use mutual TLS for authentication:
+
+  **Certificate Authorities**:
+  - Each organization operates its own CA
+  - Root certificates distributed to all parties
+  - Certificate validation on every connection
+
+  **Certificate Types**:
+  1. **TLS Certificates**: For transport security and authentication
+  2. **Consent Signaling Certificates**: For cryptographic signing (DER format)
+
+  **Certificate Management**:
+  - Can use Cloud Certificate Authority Service
+  - OpenSSL for format conversion
+  - Tinkey for encryption key generation
+
+  See [Certificate Rotation](/operations/certificate-rotation) for management procedures.
+</Accordion>
+
+<Accordion title="Workload Identity">
+  **Purpose**: Grant Kubernetes pods access to Google Cloud resources
+
+  **Configuration**:
+  - Enabled at cluster creation
+  - Service accounts per component
+  - IAM bindings for resource access
+
+  **Typical Service Accounts**:
+  - `kingdom-internal`: Spanner database access
+  - `duchy-storage`: Cloud Storage bucket access
+  - `reporting-internal`: Reporting database access
+
+  See the deployment guides for cluster configuration details.
+</Accordion>
+
+### Network Policies
+
+Kubernetes network policies provide fine-grained network access control:
+
+**Default Policy**:
+- Deny all ingress and egress by default
+
+**Service-Specific Policies**:
+- `kube-dns-network-policy`: Allow DNS resolution
+- `gke-network-policy`: Allow GKE control plane communication
+- `{service}-network-policy`: Explicit policies for each service
+
+**Policy Structure**:
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: v2alpha-public-api-server-network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: v2alpha-public-api-server
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector: {}  # Allow from any pod in namespace
+    ports:
+    - protocol: TCP
+      port: 8443
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: gcp-kingdom-data-server
+```
+
+## Deployment Topology
+
+### Typical Kingdom Deployment
+
+| Component | Type | Replicas | Exposure | Port |
+|-----------|------|----------|----------|------|
+| Internal Data Server | Deployment | 1+ | ClusterIP | 8443 |
+| System API Server | Deployment | 1+ | LoadBalancer | 8443 |
+| v2alpha Public API Server | Deployment | 1+ | LoadBalancer | 8443 |
+| Completed Measurements Deletion | CronJob | - | - | - |
+| Pending Measurements Cancellation | CronJob | - | - | - |
+| Exchanges Deletion | CronJob | - | - | - |
+
+### Typical Duchy Deployment
+
+| Component | Type | Replicas | Exposure | Port |
+|-----------|------|----------|----------|------|
+| Spanner Computations Server | Deployment | 1+ | ClusterIP | 8443 |
+| Async Computation Control Server | Deployment | 1+ | ClusterIP | 8443 |
+| Computation Control Server | Deployment | 1+ | LoadBalancer | 8443 |
+| Requisition Fulfillment Server | Deployment | 1+ | LoadBalancer | 8443 |
+| Herald Daemon | Deployment | 1 | None | - |
+| Mill Job Scheduler | Deployment | 1 | None | - |
+| LLv2 Mill | PodTemplate → Job | Dynamic | None | - |
+| HMSS Mill | PodTemplate → Job | Dynamic | None | - |
+| Computations Cleaner | CronJob | - | - | - |
+
+## Resource Requirements
+
+### Compute Resources
+
+Typical resource allocations (adjust based on workload):
+
+**Kingdom Services**:
+- CPU: 1-2 cores per replica
+- Memory: 2-4 GB per replica
+- JVM heap: 50-75% of container memory
+
+**Duchy Services**:
+- CPU: 1-2 cores per replica
+- Memory: 2-4 GB per replica
+
+**Mills**:
+- CPU: 4-8 cores (computation-intensive)
+- Memory: 8-16 GB (depending on dataset size)
+- Ephemeral storage: 10-50 GB
+
+### Storage Requirements
+
+**Spanner**:
+- Kingdom: Depends on number of measurements and resources
+- Duchy: Primarily computation metadata (moderate size)
+
+**Cloud Storage**:
+- Duchy: Size of encrypted sketches (varies with data volume)
+- Retention: Based on computation cleanup policies
+
+## Monitoring and Observability
+
+### Metrics
+
+Services expose metrics for monitoring:
+
+- **Prometheus**: Metrics endpoint on each service
+- **Grafana**: Dashboards for visualization
+- **OpenTelemetry**: Distributed tracing (optional)
+
+See [Monitoring](/operations/monitoring) for metrics deployment and setup.
+
+### Logging
+
+- **Structured Logging**: JSON-formatted logs
+- **Log Levels**: Configurable via JVM flags
+- **Cloud Logging**: Integration with GKE/EKS logging
+
+### Health Checks
+
+- **Liveness Probes**: Detect crashed containers
+- **Readiness Probes**: Traffic routing control
+- **Startup Probes**: Handle slow-starting containers
+
+## Code Organization
+
+Source code is organized under `org.wfanet.measurement` package:
+
+```
+src/main/kotlin/org/wfanet/measurement/
+├── kingdom/
+│   ├── service/
+│   │   ├── api/v2alpha/        # Public API implementations
+│   │   ├── system/v1alpha/     # System API implementations
+│   │   └── internal/           # Internal services
+│   └── deploy/
+│       ├── common/             # Cloud-agnostic deployments
+│       └── gcloud/             # GCP-specific deployments
+├── duchy/
+│   ├── service/
+│   │   ├── api/v2alpha/        # Public API (requisition fulfillment)
+│   │   ├── system/v1alpha/     # System API (computation control)
+│   │   └── internal/           # Internal services
+│   ├── herald/                 # Herald daemon
+│   ├── mill/                   # Mill implementations
+│   │   ├── liquidlegionsv2/    # LLv2 protocol
+│   │   ├── shareshuffle/       # HMSS protocol
+│   │   └── trustee/            # Key management
+│   └── deploy/
+│       ├── common/             # Cloud-agnostic deployments
+│       ├── gcloud/             # GCP-specific deployments
+│       └── aws/                # AWS-specific deployments
+└── common/                     # Shared libraries and utilities
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Deploy a Kingdom" icon="crown" href="/deployment/kingdom-gke">
+    Complete guide to deploying Kingdom components on GKE
+  </Card>
+  <Card title="Deploy a Duchy" icon="shield" href="/deployment/duchy-gke">
+    Step-by-step Duchy deployment instructions
+  </Card>
+  <Card title="Create Resources" icon="plus" href="/operations/creating-resources">
+    How to create and manage system resources
+  </Card>
+  <Card title="Building from Source" icon="hammer" href="/development/building">
+    Build container images and run tests
+  </Card>
+</CardGroup>
